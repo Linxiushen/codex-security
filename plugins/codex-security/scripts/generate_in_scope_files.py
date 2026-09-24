@@ -95,7 +95,7 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--path-separator",
         "/",
         "--glob",
-        "!.git/**",
+        "!**/.git",
         "--",
         scope,
     ]

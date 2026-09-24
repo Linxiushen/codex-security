@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -73,7 +73,7 @@ def run_inventory(
 
 def standard_inventory(repository: Path, scope: str) -> bytes:
     files = subprocess.run(
-        ["rg", "--files", "--hidden", "--glob", "!.git/**", "--path-separator=/", "--", scope],
+        ["rg", "--files", "--hidden", "--glob", "!**/.git", "--path-separator=/", "--", scope],
         cwd=repository,
         capture_output=True,
         check=False,
@@ -146,6 +146,44 @@ def test_inventory_keeps_ignored_tracked_files_without_ignored_untracked_files(
     assert "./ignored/tracked.py" in paths
     assert "./ignored/secret.py" not in paths
     assert "./app/ignored.skip" not in paths
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [(".", "./vendor/lib/handler.py"), ("vendor", "vendor/lib/handler.py")],
+)
+def test_inventory_excludes_git_metadata_from_a_nested_repository(
+    tmp_path: Path, scope: str, expected: str
+) -> None:
+    repository = make_repository(tmp_path)
+    write_file(repository, "vendor/lib/handler.py")
+    write_file(repository, "vendor/lib/.git/HEAD", b"ref: refs/heads/main\n")
+    write_file(repository, "vendor/lib/.git/config", b"[core]\n\tbare = false\n")
+    write_file(repository, "vendor/lib/.git/objects/ab/cdef", b"blob")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert expected in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
+
+
+def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path) -> None:
+    repository = make_repository(tmp_path)
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "base")
+    worktree = tmp_path / "worktree"
+    git(repository, "worktree", "add", "-q", str(worktree), "HEAD")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(worktree, ".", output)
+
+    assert result.returncode == 0, result.stderr
+    paths = output.read_text(encoding="utf-8").splitlines()
+    assert "./app/routes.py" in paths
+    assert "./.git" not in paths
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")

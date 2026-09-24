@@ -456,7 +456,7 @@ async function standardInventory(repository, scope) {
       "--files",
       "--hidden",
       "--glob",
-      "!.git/**",
+      "!**/.git",
       "--path-separator=/",
       "--",
       scope,
