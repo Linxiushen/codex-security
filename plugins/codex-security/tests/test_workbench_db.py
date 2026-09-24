@@ -4129,6 +4129,66 @@ def test_workbench_populates_clean_git_scan_revision_with_large_source_excerpt(
     assert refreshed["scan"]["findings"][0]["sourceExcerpt"] == excerpt
 
 
+def commit_source_fixture(target: Path, source: bytes) -> str:
+    initialize_git_repository(target)
+    (target / "README.md").write_bytes(source)
+    # Stage the bytes verbatim so hosts that enable core.autocrlf keep the fixture line endings.
+    subprocess.run(["git", "-c", "core.autocrlf=false", "add", "README.md"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize("separator", ["\f", "\v", "\x85", "\u2028"])
+def test_source_excerpt_breaks_lines_only_at_newlines(tmp_path: Path, separator: str) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    finding_source_excerpt = namespace["finding_source_excerpt"]
+    target = tmp_path / "target"
+    revision = commit_source_fixture(
+        target,
+        "".join(
+            f"source line {line_number}{separator if line_number == 2 else ''}\n"
+            for line_number in range(1, 11)
+        ).encode(),
+    )
+
+    excerpt = finding_source_excerpt(
+        {"target_revision": revision, "target_snapshot_digest": None},
+        target,
+        [{"path": "README.md", "startLine": 5, "endLine": 5}],
+    )
+
+    assert excerpt == "\n".join(
+        f"{line_number}  source line {line_number}{separator if line_number == 2 else ''}"
+        for line_number in range(2, 9)
+    )
+
+
+def test_source_excerpt_omits_carriage_returns_from_crlf_sources(tmp_path: Path) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    finding_source_excerpt = namespace["finding_source_excerpt"]
+    target = tmp_path / "target"
+    revision = commit_source_fixture(
+        target,
+        "".join(f"source line {line_number}\r\n" for line_number in range(1, 11)).encode(),
+    )
+
+    excerpt = finding_source_excerpt(
+        {"target_revision": revision, "target_snapshot_digest": None},
+        target,
+        [{"path": "README.md", "startLine": 5, "endLine": 5}],
+    )
+
+    assert excerpt == "\n".join(
+        f"{line_number}  source line {line_number}" for line_number in range(2, 9)
+    )
+
+
 def test_workbench_preserves_in_flight_git_scan_during_migration_normalization(
     tmp_path: Path,
 ) -> None:
