@@ -1820,7 +1820,6 @@ export async function prepareScanArtifactRestorer(
           ],
           pluginHelperEnvironment(options.environment),
           contents,
-          options.signal,
         );
         if (!result.success) {
           throw new Error(
@@ -1830,7 +1829,6 @@ export async function prepareScanArtifactRestorer(
           );
         }
       } catch (error) {
-        if (options.signal?.aborted) throw error;
         throw new OutputDirectoryError(
           "Could not safely restore a completed scan artifact.",
           { cause: error },
