@@ -1376,8 +1376,11 @@ describe("multiscan", () => {
     const paths = await fixture();
     const knowledgeBasePaths = [
       join(paths.root, "architecture.md"),
-      "shared/threat-model.md",
+      join(paths.root, "threat-model.md"),
     ];
+    await Promise.all(
+      knowledgeBasePaths.map((path) => writeFile(path, "Synthetic context.")),
+    );
     const sources = await Promise.all(
       ["one", "two", "three"].map((name) => repository(paths.root, name)),
     );
@@ -1944,7 +1947,8 @@ describe("multiscan", () => {
     const paths = await fixture();
     const source = await repository(paths.root, "retry");
     const secret = "sk-proj-SYNTHETIC_MULTISCAN_SECRET_123";
-    const knowledgeBasePaths = ["architecture.md"];
+    const knowledgeBasePaths = [join(paths.root, "architecture.md")];
+    await writeFile(knowledgeBasePaths[0]!, "Synthetic context.");
     const proxyUrl =
       "https://SYNTHETIC_USER:SYNTHETIC_MULTISCAN_PASSWORD@proxy.test/v1/responses";
     const queryUrl =
@@ -2015,6 +2019,7 @@ describe("multiscan", () => {
       { scanPrompt: "Review different boundaries." },
       { postScanPrompt: "Draft confirmed fixes." },
       { maxCostUsd: 12.5 },
+      { config: { codexOverrides: { model: "synthetic-model" } } },
     ]) {
       await expect(
         runMultiscan(options(paths, security, prompts)),
@@ -2037,6 +2042,115 @@ describe("multiscan", () => {
     );
     expect(calls).toBe(2);
   });
+
+  test.each([false, true])(
+    "campaign resume binds extracted knowledge from mode settings=%p",
+    async (perMode) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "knowledge");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nknowledge,${source.path},${source.revision}\n`,
+      );
+      const knowledge = join(paths.root, "knowledge-base");
+      await mkdir(knowledge);
+      const document = join(knowledge, "architecture.md");
+      await writeFile(document, "Original context.");
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls++;
+        return completedScan(scanOptions.outputDir!);
+      });
+      const run = (knowledgeBasePaths: string[]) =>
+        runMultiscan(
+          options(
+            paths,
+            security,
+            perMode
+              ? { scanOptionsByMode: { standard: { knowledgeBasePaths } } }
+              : { knowledgeBasePaths },
+          ),
+        );
+      await run([knowledge]);
+      expect(
+        await run(perMode ? [knowledge] : [document, document]),
+      ).toMatchObject({ skipped: 1 });
+      await writeFile(document, "Revised context.");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      await writeFile(document, "Original context.");
+      const additional = join(knowledge, "constraints.txt");
+      await writeFile(additional, "Additional context.");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      await rm(additional);
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      delete manifest.knowledgeBaseDigest;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      await expect(run([knowledge])).rejects.toThrow("manifest does not match");
+      expect(calls).toBe(1);
+    },
+  );
+
+  test.each([false, true])(
+    "campaign resume binds overrides with configured modes=%p",
+    async (configuredModes) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "configuration");
+      await writeFile(
+        paths.input,
+        `id,repository,revision\nconfiguration,${source.path},${source.revision}\n`,
+      );
+      let calls = 0;
+      const security = client(async (_repository, scanOptions = {}) => {
+        calls++;
+        return completedScan(scanOptions.outputDir!);
+      });
+      const initial = options(paths, security, {
+        ...(configuredModes
+          ? { scanOptionsByMode: { standard: { target: ["src"] } } }
+          : {}),
+        config: {
+          codexOverrides: {
+            model: "synthetic-model",
+            features: { example: true },
+          },
+        },
+      });
+      await runMultiscan(initial);
+      expect(
+        await runMultiscan({
+          ...initial,
+          workers: 3,
+          maxAttempts: 4,
+          config: {
+            codexOverrides: {
+              features: { example: true },
+              model: "synthetic-model",
+            },
+          },
+        }),
+      ).toMatchObject({ skipped: 1 });
+      await expect(
+        runMultiscan({
+          ...initial,
+          config: {
+            codexOverrides: {
+              model: "changed-model",
+              features: { example: true },
+            },
+          },
+        }),
+      ).rejects.toThrow("manifest does not match");
+      const manifestPath = join(paths.output, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      delete manifest.configurationDigest;
+      await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
+      await expect(runMultiscan(initial)).rejects.toThrow(
+        "manifest does not match",
+      );
+      expect(calls).toBe(1);
+    },
+  );
 
   test.skipIf(process.platform !== "win32")(
     "resumes campaigns across Windows repository path aliases",

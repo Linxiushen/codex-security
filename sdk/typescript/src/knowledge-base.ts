@@ -114,6 +114,24 @@ export async function prepareKnowledgeBase(
   };
 }
 
+/** @internal Read the same extracted document text used by scans. */
+export async function readKnowledgeBaseDocuments(
+  paths: readonly string[],
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const prepared = await prepareKnowledgeBase(paths, signal);
+  try {
+    const files = (await readdir(prepared.path)).sort();
+    return await Promise.all(
+      files.map((file) =>
+        readFile(join(prepared.path, file), { encoding: "utf8", signal }),
+      ),
+    );
+  } finally {
+    await prepared.cleanup();
+  }
+}
+
 async function discover(
   directory: string,
   signal?: AbortSignal,

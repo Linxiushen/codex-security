@@ -28,6 +28,7 @@ import {
   ScanCostLimitExceededError,
 } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
+import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
 import { DiffTarget, type ScanMode } from "./targets.js";
@@ -813,9 +814,28 @@ async function ensureManifest(
     | "postScanPrompt"
     | "maxCostUsd"
     | "scanOptionsByMode"
+    | "knowledgeBasePaths"
     | "config"
+    | "signal"
   >,
 ): Promise<void> {
+  const knowledgeByMode = Object.fromEntries(
+    await Promise.all(
+      [...new Set(tasks.map((task) => task.mode))].map(async (mode) => {
+        const paths = options.knowledgeBasePaths?.length
+          ? options.knowledgeBasePaths
+          : options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
+        return [
+          mode,
+          paths?.length
+            ? workflowDigest(
+                await readKnowledgeBaseDocuments(paths, options.signal),
+              )
+            : undefined,
+        ];
+      }),
+    ),
+  );
   const expected = `${JSON.stringify(
     {
       version: 1,
@@ -832,7 +852,11 @@ async function ensureManifest(
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
-      ...(options.scanOptionsByMode === undefined
+      ...(Object.values(knowledgeByMode).some((digest) => digest !== undefined)
+        ? { knowledgeBaseDigest: workflowDigest(knowledgeByMode) }
+        : {}),
+      ...(options.scanOptionsByMode === undefined &&
+      Object.keys(options.config.codexOverrides ?? {}).length === 0
         ? {}
         : {
             configurationDigest: workflowDigest({
