@@ -50,3 +50,18 @@ assert(
   plugin.interface.defaultPrompt.every((prompt) => [...prompt].length <= 128),
 );
 assert(plugin.interface.defaultPrompt.includes("Triage existing security findings against this repository."));
+
+const githubIntake = require("../assertions/github-rest-intake.js");
+const connectorContext = { vars: { expected_github_rest_behavior: "explicit_connector" } };
+const connectorAnswer = "Use the GitHub Connector's read-only tools for the requested source. "
+  + "If the endpoint is unavailable, explain that limitation and ask before using REST "
+  + "with the specified GitHub account and exact repository.";
+assert.equal(githubIntake(connectorAnswer, connectorContext).pass, true);
+for (const answer of [
+  "Use the GitHub Connector only as an auth token source. Retrieve findings with REST. "
+    + "Do not use the GitHub Connector to fetch findings.",
+  "Use the GitHub Connector's read-only tools. If the endpoint is unavailable, "
+    + "explain the limitation and use REST with the specified account and exact repository.",
+]) {
+  assert.equal(githubIntake(answer, connectorContext).pass, false);
+}

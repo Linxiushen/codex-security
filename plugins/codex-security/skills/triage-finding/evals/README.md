@@ -49,7 +49,7 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `assertions/missing-input.js` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, and explicit-only GitHub Issue handling.
+- `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector selection with approved REST fallback, and explicit-only GitHub Issue handling.
 
 ## Calibration Dataset
 

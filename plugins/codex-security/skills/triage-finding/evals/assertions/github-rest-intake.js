@@ -118,6 +118,23 @@ const checks = {
     ];
   },
 
+  explicit_connector: (text) => {
+    const failures = [];
+    if (!/GitHub Connector/i.test(text) || !/read.only/i.test(text)) {
+      failures.push("must use the GitHub Connector's read-only tools for the requested source");
+    }
+    if (!/explain.*(?:limitation|unavailable|unsupported)|(?:limitation|unavailable|unsupported).*explain/is.test(text)) {
+      failures.push("must explain when the connector cannot access the required endpoint");
+    }
+    if (!/(?:ask|request|obtain).*?(?:before|approval|permission|consent).*?REST/is.test(text)) {
+      failures.push("must ask before falling back to REST");
+    }
+    if (!/account/i.test(text) || !/exact repository/i.test(text)) {
+      failures.push("must scope REST approval to the specified account and exact repository");
+    }
+    return failures;
+  },
+
   explicit_issue: (text) => {
     return [
       ...(!/GitHub Issues?.*(explicit|specific)|specific.*GitHub Issues?/is.test(text)
