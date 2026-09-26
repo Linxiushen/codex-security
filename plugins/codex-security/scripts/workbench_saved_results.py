@@ -475,6 +475,7 @@ def merge_saved_results(
     """Read only bound parent/worker files; return an unsealed loss-preserving union."""
     initial_warnings = set(warnings)
     parent: dict[str, Any] | None = None
+    frozen_parent_path: str | None = None
     parent_manifest: dict[str, Any] | None = None
     if frozen_source_digests is None or allow_frozen_legacy_parent:
         try:
@@ -489,7 +490,18 @@ def merge_saved_results(
         if parent_manifest is not None and parent is not None:
             parent_scan = parent_manifest["scan"]
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
-                payload = _encoded(parent)
+                snapshot = parent
+                if stopped:
+                    # Bind the frozen parent even if canonical outputs are lost.
+                    snapshot = {
+                        **parent,
+                        "previousParentCheckpoints": [
+                            f"checkpoints/{name}"
+                            for name in _children(scan_dir, "checkpoints")
+                            if re.fullmatch(r"[0-9a-f]{64}\.json", name)
+                        ],
+                    }
+                payload = _encoded(snapshot)
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
                 write_scan_local_bytes(scan_dir, parent_checkpoint, payload)
@@ -609,23 +621,29 @@ def merge_saved_results(
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
-    frozen_parent_projections = {
-        relative: draft["coverage"]
-        for relative, draft, _ in sources
-        if frozen_source_digests is not None
-        and relative.startswith("checkpoints/")
-        and isinstance(draft["coverage"].get("reviews"), list)
-    }
-    projected_coverages = [
-        parent["coverage"] if parent else {},
-        *frozen_parent_projections.values(),
-    ]
+    if parent is None and frozen_source_digests is not None:
+        # Older host snapshots remain evidence; only the newest is the current parent.
+        saved_parents = {
+            relative: draft
+            for relative, draft, _ in sources
+            if relative.startswith("checkpoints/")
+            and isinstance(draft.get("previousParentCheckpoints"), list)
+        }
+        previous_parents = {
+            relative
+            for draft in saved_parents.values()
+            for relative in draft["previousParentCheckpoints"]
+        }
+        for relative, draft in saved_parents.items():
+            if relative not in previous_parents:
+                frozen_parent_path, parent = relative, draft
+                break
+    projected_coverage = parent["coverage"] if parent else {}
     # V1 persists the review projection in the parent, without reducer sourceCoverage.
+    reviews = projected_coverage.get("reviews")
     reviewed_attempts = {
         (review.get("workerId"), review.get("attempt"))
-        for projected in projected_coverages
-        if isinstance(reviews := projected.get("reviews"), list)
-        for review in reviews
+        for review in (reviews if isinstance(reviews, list) else [])
         if isinstance(review, dict)
         and isinstance(review.get("workerId"), str)
         and isinstance(review.get("attempt"), int)
@@ -649,24 +667,23 @@ def merge_saved_results(
         ]
 
     def coverage_record_retained(field: str, item: dict[str, Any]) -> bool:
-        for projection in projected_coverages:
-            records = projection.get(field, [])
-            for record in records if isinstance(records, list) else []:
-                if not isinstance(record, dict):
-                    continue
-                original = dict(record)
-                if "id" not in item:
-                    original.pop("id", None)  # Canonical publication can assign an ID.
-                if field == "openQuestions":
-                    # Compare the same canonical form that publication writes.
-                    previous_question = {"openQuestions": [original]}
-                    source_question = {"openQuestions": [item]}
-                    _normalize_unsealed_open_questions(previous_question)
-                    _normalize_unsealed_open_questions(source_question)
-                    if previous_question == source_question:
-                        return True
-                elif original == item:
+        records = projected_coverage.get(field, [])
+        for record in records if isinstance(records, list) else []:
+            if not isinstance(record, dict):
+                continue
+            original = dict(record)
+            if "id" not in item:
+                original.pop("id", None)  # Canonical publication can assign an ID.
+            if field == "openQuestions":
+                # Compare the same canonical form that publication writes.
+                previous_question = {"openQuestions": [original]}
+                source_question = {"openQuestions": [item]}
+                _normalize_unsealed_open_questions(previous_question)
+                _normalize_unsealed_open_questions(source_question)
+                if previous_question == source_question:
                     return True
+            elif original == item:
+                return True
         return False
 
     def project_missing_record(
@@ -701,19 +718,18 @@ def merge_saved_results(
                     )
                     if isinstance(surface, dict) and isinstance(surface.get("id"), str)
                 }
-                for projection in projected_coverages:
-                    surfaces = projection.get("surfaces", [])
-                    for surface in surfaces if isinstance(surfaces, list) else []:
-                        if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
-                            continue
-                        provenance = surface.get("provenance", {})
-                        if (
-                            isinstance(provenance, dict)
-                            and provenance.get("workerId") == worker["id"]
-                            and provenance.get("attempt") == worker["attempt"]
-                            and isinstance(provenance.get("sourceId"), str)
-                        ):
-                            surface_ids[provenance["sourceId"]] = surface["id"]
+                surfaces = projected_coverage.get("surfaces", [])
+                for surface in surfaces if isinstance(surfaces, list) else []:
+                    if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                        continue
+                    provenance = surface.get("provenance", {})
+                    if (
+                        isinstance(provenance, dict)
+                        and provenance.get("workerId") == worker["id"]
+                        and provenance.get("attempt") == worker["attempt"]
+                        and isinstance(provenance.get("sourceId"), str)
+                    ):
+                        surface_ids[provenance["sourceId"]] = surface["id"]
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]
@@ -840,9 +856,7 @@ def merge_saved_results(
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     current_drafts = ([(None, parent)] if parent else []) + [
-        (worker_id, draft)
-        for relative, draft, worker_id in sources
-        if relative in current_results or relative in frozen_parent_projections
+        (worker_id, draft) for relative, draft, worker_id in sources if relative in current_results
     ]
 
     def coverage_candidate(
@@ -933,6 +947,12 @@ def merge_saved_results(
             and parent.get("complete") is not False
             and relative != "parent"
             and (not stopped_parent_seal or relative in parent_preserved_sources)
+            and (
+                # Explicit recovery can admit checkpoints written after this parent.
+                frozen_parent_path is None
+                or relative == frozen_parent_path
+                or relative in parent["previousParentCheckpoints"]
+            )
         ) or (
             relative not in current_results
             and any(
@@ -1105,7 +1125,7 @@ def merge_saved_results(
             and worker["merge_state"] == "merged"
             and (worker_id, worker["attempt"]) in reviewed_attempts
         )
-        if superseded and relative not in frozen_parent_projections:
+        if superseded:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
             items = draft["coverage"].get(field, [])

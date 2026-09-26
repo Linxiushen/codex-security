@@ -7,6 +7,7 @@ from argparse import Namespace
 import pytest
 from test_deep_scan_successful_publication import add_worker
 from test_deep_scan_successful_publication import publication_scan as publication_scan
+from workbench_test_support import write_checkpoint
 
 
 @pytest.mark.parametrize("worker_count", [1, 2])
@@ -261,3 +262,131 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
     assert coverage["openQuestions"] == projected
     assert result.read_bytes() == original
+
+
+@pytest.mark.parametrize("older_complete", [False, True])
+@pytest.mark.parametrize("recovery", [None, "retry", "missing", "changed", "incomplete"])
+def test_stopped_recovery_keeps_current_parent_projection(
+    workbench_api, workbench_db, publication_scan, monkeypatch, older_complete, recovery
+):
+    retry_publication = recovery is not None
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    deferred = {"candidateId": "candidate-1", "reason": "The current review remains unresolved."}
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "completeness": "partial", "deferred": [deferred]},
+            }
+        )
+    )
+    reducer = add_worker(workbench_db, scan)
+    reducer.write_text(json.dumps({"scanId": scan.scan_id, "findings": []}))
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE id = ?",
+            (reducer.parent.name,),
+        )
+    reviews = [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}]
+    obsolete = write_checkpoint(
+        scan.scan_dir / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": older_complete,
+            "previousParentCheckpoints": [],
+            "findings": [],
+            "coverage": {
+                **scan.coverage,
+                "reviews": reviews,
+                "openQuestions": ["This question was answered by the final parent draft."],
+                "surfaces": [
+                    {
+                        "id": "old-disposition",
+                        "label": "Earlier disposition",
+                        "disposition": "rejected",
+                        "candidateId": "projected-candidate",
+                        "receiptRefs": [],
+                        "provenance": {
+                            "workerId": worker_id,
+                            "attempt": 1,
+                            "candidateId": "candidate-1",
+                        },
+                    }
+                ],
+            },
+        },
+    )
+    question = {
+        "question": "Which deployment control remains unverified?",
+        "provenance": {"workerId": worker_id, "attempt": 1},
+    }
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "reviews": reviews,
+                "openQuestions": [question],
+            }
+        )
+    )
+    if recovery == "incomplete":
+        manifest_path = scan.scan_dir / "scan-manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["scan"]["complete"] = False
+        manifest_path.write_text(json.dumps(manifest))
+    original_sources = {path: path.read_bytes() for path in (result, reducer, obsolete)}
+    with monkeypatch.context() as interrupted:
+        if retry_publication:
+
+            def fail_publication(*args, **kwargs):
+                raise OSError("Synthetic publication interruption.")
+
+            interrupted.setattr(
+                workbench_api["saved_results"],
+                "_write_prepared_scan_finalization",
+                fail_publication,
+            )
+        stopped = workbench_api["fail_scan"](
+            workbench_db,
+            Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+        )["scan"]
+    assert stopped["resultsRecoveryNeeded"] is retry_publication
+    frozen_sources = {
+        path: path.read_bytes() for path in (scan.scan_dir / "checkpoints").glob("*.json")
+    }
+    if recovery == "missing":
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+    elif recovery == "changed":
+        (scan.scan_dir / "coverage.json").write_text(
+            json.dumps({**scan.coverage, "openQuestions": ["Late parent content must be ignored."]})
+        )
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    expected_questions = [question]
+    if recovery == "incomplete":
+        expected_questions.append(
+            {"question": "This question was answered by the final parent draft."}
+        )
+    assert coverage["openQuestions"] == expected_questions
+    assert coverage["reviews"] == reviews
+    assert [item["id"] for item in coverage["surfaces"]] == (
+        ["old-disposition"] if recovery == "incomplete" else []
+    )
+    assert (
+        len([item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]])
+        == 1
+    )
+    assert all(path.read_bytes() == original for path, original in original_sources.items())
+    assert all(path.read_bytes() == original for path, original in frozen_sources.items())
+    published = (scan.scan_dir / "coverage.json").read_bytes()
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert (scan.scan_dir / "coverage.json").read_bytes() == published
