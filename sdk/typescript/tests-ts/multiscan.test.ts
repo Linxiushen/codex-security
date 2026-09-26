@@ -27,6 +27,9 @@ import { buildGitHubCredentialArgs, runMultiscan } from "../src/multiscan.js";
 import { resolveTrustedExecutable } from "../src/trusted-executable.js";
 import { DiffTarget } from "../src/targets.js";
 import { prepareOutputDir } from "../src/runtime.js";
+import { workflowDigest } from "../src/finding-workflow.js";
+import { TestClient, mockWorkbench } from "./support/api-client.js";
+import { preparedRuntime } from "./support/api-events.js";
 import { capture, dependencies, fakeResult } from "./cli-fixtures.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 
@@ -2090,6 +2093,164 @@ describe("multiscan", () => {
       expect(calls).toBe(1);
     },
   );
+
+  test.each([false, true])(
+    "campaign workers stage the fingerprinted snapshot with mode settings=%p",
+    async (perMode) => {
+      const paths = await fixture();
+      const source = await repository(paths.root, "snapshot");
+      const modes = ["standard", "deep", "standard", "deep"] as const;
+      await writeFile(
+        paths.input,
+        "id,repository,revision,mode\n" +
+          modes
+            .map(
+              (mode, index) =>
+                `repo-${index},${source.path},${source.revision},${mode}`,
+            )
+            .join("\n") +
+          "\n",
+      );
+      const standard = join(paths.root, "architecture.md");
+      const deep = join(paths.root, "threat-model.txt");
+      await writeFile(standard, "Original architecture.");
+      await writeFile(deep, "Original threat model.");
+      const homes = [join(paths.root, "home-1"), join(paths.root, "home-2")];
+      await Promise.all(homes.map((home) => mkdir(home)));
+      let created = 0;
+      let calls = 0;
+      const staged: Record<string, string>[] = [];
+      const recipes: Record<string, unknown>[] = [];
+      const summary = await runMultiscan(
+        options(
+          paths,
+          client(async () => {
+            throw new Error("Unexpected client");
+          }),
+          {
+            workers: 2,
+            maxAttempts: 1,
+            ...(perMode ? {} : { knowledgeBasePaths: [standard] }),
+            scanOptionsByMode: {
+              standard: { knowledgeBasePaths: [standard] },
+              deep: { knowledgeBasePaths: [deep] },
+            },
+            createSecurity: (config) => {
+              const home = homes[created++]!;
+              return new TestClient(config, {
+                environment: {},
+                prepareRuntime: async () => preparedRuntime(home),
+                resolvePluginPython: async () => "/managed/python",
+                repositoryRevision: async () => source.revision,
+                runWorkbench: async (_options, args, input) => {
+                  if (args[0] === "register-cli-scan")
+                    recipes.push(JSON.parse(input!).recipe);
+                  return mockWorkbench(args, input);
+                },
+                createCodex: (codex) => ({
+                  startThread: () => ({
+                    id: null,
+                    async runStreamed() {
+                      const first = calls++ === 0;
+                      if (first) {
+                        await writeFile(
+                          standard,
+                          "Changed after the manifest was saved.",
+                        );
+                        await rm(deep);
+                      }
+                      const directory =
+                        codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+                      staged.push(
+                        Object.fromEntries(
+                          await Promise.all(
+                            (await readdir(directory)).map(async (name) => [
+                              name,
+                              await readFile(join(directory, name), "utf8"),
+                            ]),
+                          ),
+                        ),
+                      );
+                      throw new Error(
+                        "Synthetic model stop after reading staged knowledge.",
+                      );
+                    },
+                  }),
+                }),
+              });
+            },
+          },
+        ),
+      );
+      expect(created).toBe(2);
+      expect(calls).toBe(4);
+      expect(summary).toMatchObject({ total: 4, failed: 4 });
+      expect(
+        (await results(summary.resultsPath)).every((row) =>
+          String(row["error"]).includes("Synthetic model stop"),
+        ),
+      ).toBe(true);
+      const standardDocuments = {
+        "0-architecture.md.txt": "Original architecture.",
+      };
+      const deepDocuments = perMode
+        ? { "0-threat-model.txt.txt": "Original threat model." }
+        : standardDocuments;
+      expect(
+        staged.filter(
+          (documents) =>
+            JSON.stringify(documents) === JSON.stringify(standardDocuments),
+        ),
+      ).toHaveLength(perMode ? 2 : 4);
+      if (perMode)
+        expect(
+          staged.filter(
+            (documents) =>
+              JSON.stringify(documents) === JSON.stringify(deepDocuments),
+          ),
+        ).toHaveLength(2);
+      for (const recipe of recipes) {
+        expect(recipe["knowledgeBasePaths"]).toEqual([
+          perMode && recipe["mode"] === "deep" ? deep : standard,
+        ]);
+        expect(recipe["knowledgeBaseSnapshot"]).toBeUndefined();
+      }
+      const manifestText = await readFile(
+        join(paths.output, "manifest.json"),
+        "utf8",
+      );
+      expect(JSON.parse(manifestText).knowledgeBaseDigest).toBe(
+        workflowDigest({
+          standard: workflowDigest(standardDocuments),
+          deep: workflowDigest(deepDocuments),
+        }),
+      );
+      expect(manifestText).not.toContain("Original architecture.");
+      expect(manifestText).not.toContain("Original threat model.");
+    },
+  );
+
+  test("renaming a top-level knowledge document invalidates saved results", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "renamed-knowledge");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const document = join(paths.root, "architecture.md");
+    const renamed = join(paths.root, "deployment.md");
+    await writeFile(document, "Unchanged text.");
+    const security = client(async (_repository, scan = {}) =>
+      completedScan(scan.outputDir!),
+    );
+    await runMultiscan(
+      options(paths, security, { knowledgeBasePaths: [document] }),
+    );
+    await rename(document, renamed);
+    await expect(
+      runMultiscan(options(paths, security, { knowledgeBasePaths: [renamed] })),
+    ).rejects.toThrow("manifest does not match");
+  });
 
   test.each([false, true])(
     "campaign resume binds overrides with configured modes=%p",

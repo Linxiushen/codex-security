@@ -4707,6 +4707,7 @@ export async function main(
                     try {
                       return await security.run(recipe.repository!, {
                         ...pickScanSettings(recipe),
+                        knowledgeBaseSnapshot: prompts.knowledgeBaseSnapshot,
                         resumeScanId: scan.scanId,
                         outputDir: scanDir,
                         safetyIdentifier: recipe.safetyIdentifier,

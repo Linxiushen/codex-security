@@ -28,7 +28,10 @@ import {
   ScanCostLimitExceededError,
 } from "./errors.js";
 import type { CoverageDocument } from "./models.js";
-import { readKnowledgeBaseDocuments } from "./knowledge-base.js";
+import {
+  readKnowledgeBaseSnapshot,
+  type KnowledgeBaseSnapshot,
+} from "./knowledge-base.js";
 import { resolveScanPrompts } from "./prompt-files.js";
 import { requireSecureOutputAncestry, validateOutputDir } from "./runtime.js";
 import { DiffTarget, type ScanMode } from "./targets.js";
@@ -83,7 +86,9 @@ export interface MultiscanOptions extends ScanPromptSettings {
   maxAttempts: number;
   recoverScan?(
     scanDir: string,
-    prompts: ScanPromptSettings,
+    prompts: ScanPromptSettings & {
+      knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
+    },
   ): Promise<Pick<ScanResult, "coverage" | "cost" | "findings"> | undefined>;
   maxCostUsd?: number;
   // Prompts are shared across modes and prepared from the top-level options.
@@ -214,7 +219,28 @@ async function runCampaign(
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
-  await ensureManifest(join(output, "manifest.json"), tasks, options);
+  const knowledgeByMode: Partial<Record<ScanMode, KnowledgeBaseSnapshot>> = {};
+  const sharedKnowledge = options.knowledgeBasePaths?.length
+    ? await readKnowledgeBaseSnapshot(
+        options.knowledgeBasePaths,
+        options.signal,
+      )
+    : undefined;
+  for (const mode of new Set(tasks.map((task) => task.mode))) {
+    const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
+    const snapshot =
+      sharedKnowledge ??
+      (paths?.length
+        ? await readKnowledgeBaseSnapshot(paths, options.signal)
+        : undefined);
+    if (snapshot !== undefined) knowledgeByMode[mode] = snapshot;
+  }
+  await ensureManifest(
+    join(output, "manifest.json"),
+    tasks,
+    options,
+    knowledgeByMode,
+  );
   const receipts = await readReceipts(
     ledger,
     options.recoverScan !== undefined,
@@ -352,7 +378,10 @@ async function runCampaign(
                 attempt,
                 status: "started",
               });
-              result = await options.recoverScan(scanDir, options);
+              result = await options.recoverScan(scanDir, {
+                ...options,
+                knowledgeBaseSnapshot: knowledgeByMode[task.mode],
+              });
               attemptedResume = result !== undefined;
             }
           }
@@ -404,6 +433,7 @@ async function runCampaign(
               .join("\n\n");
             result = await security.run(checkout, {
               ...scanSettings,
+              knowledgeBaseSnapshot: knowledgeByMode[task.mode],
               ...(task.scope === undefined ? {} : { target: [task.scope] }),
               ...(options.knowledgeBasePaths?.length
                 ? { knowledgeBasePaths: options.knowledgeBasePaths }
@@ -814,27 +844,15 @@ async function ensureManifest(
     | "postScanPrompt"
     | "maxCostUsd"
     | "scanOptionsByMode"
-    | "knowledgeBasePaths"
     | "config"
-    | "signal"
   >,
+  knowledgeByMode: Partial<Record<ScanMode, KnowledgeBaseSnapshot>>,
 ): Promise<void> {
-  const knowledgeByMode = Object.fromEntries(
-    await Promise.all(
-      [...new Set(tasks.map((task) => task.mode))].map(async (mode) => {
-        const paths = options.knowledgeBasePaths?.length
-          ? options.knowledgeBasePaths
-          : options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
-        return [
-          mode,
-          paths?.length
-            ? workflowDigest(
-                await readKnowledgeBaseDocuments(paths, options.signal),
-              )
-            : undefined,
-        ];
-      }),
-    ),
+  const knowledgeDigests = Object.fromEntries(
+    Object.entries(knowledgeByMode).map(([mode, snapshot]) => [
+      mode,
+      workflowDigest(snapshot.documents),
+    ]),
   );
   const expected = `${JSON.stringify(
     {
@@ -852,8 +870,8 @@ async function ensureManifest(
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
-      ...(Object.values(knowledgeByMode).some((digest) => digest !== undefined)
-        ? { knowledgeBaseDigest: workflowDigest(knowledgeByMode) }
+      ...(Object.keys(knowledgeDigests).length > 0
+        ? { knowledgeBaseDigest: workflowDigest(knowledgeDigests) }
         : {}),
       ...(options.scanOptionsByMode === undefined &&
       Object.keys(options.config.codexOverrides ?? {}).length === 0

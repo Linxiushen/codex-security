@@ -1041,9 +1041,11 @@ and deep settings apply only to deep rows. `output.directory` can supply the
 results directory. `fail_on_severity` returns exit `1` without retrying completed
 scans, including when resuming saved results. A changed project configuration
 requires a new campaign output directory. Campaign identity also includes
-extracted knowledge-base text and direct Codex overrides. If these inputs change,
-or an older manifest lacks their fingerprints, use a new output directory.
-Worker and retry counts can change when resuming.
+extracted knowledge-base text, staged document filenames, and direct Codex overrides.
+Knowledge documents are extracted once per invocation; all workers, including
+resumed Deep scans, use that snapshot. If these inputs change, or an older manifest
+lacks their fingerprints, use a new output directory. Worker and retry counts can
+change when resuming.
 `--post-scan-prompt-file PATH` runs a follow-up in the same authenticated session,
 even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
