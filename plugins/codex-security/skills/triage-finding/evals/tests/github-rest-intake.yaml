@@ -117,9 +117,16 @@
     invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
     expected_github_rest_behavior: explicit_connector
     eval_instructions: |-
-      This is an automated eval. Describe how this workflow should handle a
-      user's explicit request to use the GitHub Connector. Do not query live
-      GitHub, inspect code, or emit the triage JSON result.
+      This is an automated eval of the transport decision. Do not query live
+      GitHub, inspect code, or emit the triage JSON result. Return one JSON
+      object with schema_version "github-transport-decision/v0". Choose each
+      field from the options below according to the skill's intake behavior:
+      - transport: "rest" or "github_connector"
+      - access: "read_write" or "read_only"
+      - unavailable_endpoint: "ignore" or "explain_limitation"
+      - rest_approval: "not_required", "before_use", or "after_use"
+      - rest_account: "specified_account" or "any_available_account"
+      - rest_repository: the owner/repo for which REST approval would apply
   options:
     disableDefaultAsserts: true
   assert:

@@ -58,24 +58,32 @@ const connectorContext = {
     target_repo: "https://github.com/promptfoo/promptfoo",
   },
 };
+const connectorDecision = {
+  schema_version: "github-transport-decision/v0",
+  transport: "github_connector",
+  access: "read_only",
+  unavailable_endpoint: "explain_limitation",
+  rest_approval: "before_use",
+  rest_account: "specified_account",
+  rest_repository: "promptfoo/promptfoo",
+};
 for (const answer of [
-  "Use the GitHub Connector's read-only tools for the requested source. "
-    + "If the endpoint is unavailable, explain that limitation and ask before using REST "
-    + "with the specified GitHub account and exact repository.",
-  "Use the GitHub Connector's read-only tools for the selected source. "
-    + "If the endpoint is unavailable, explain that limitation. Before using REST "
-    + "with the specified GitHub account for promptfoo/promptfoo, ask the user for approval.",
+  JSON.stringify(connectorDecision),
+  `Decision:\n\`\`\`json\n${JSON.stringify(connectorDecision, null, 2)}\n\`\`\``,
 ]) {
-  assert.equal(githubIntake(answer, connectorContext).pass, true);
+  const result = githubIntake(answer, connectorContext);
+  assert.equal(result.pass, true, result.reason);
 }
-for (const answer of [
-  "Use the GitHub Connector only as an auth token source. Retrieve findings with REST. "
-    + "Do not use the GitHub Connector to fetch findings.",
-  "Use the GitHub Connector's read-only tools. If the endpoint is unavailable, "
-    + "explain the limitation and use REST with the specified account and exact repository.",
-  "First ask which finding source the user wants before querying GitHub. "
-    + "Use the GitHub Connector's read-only tools. If the endpoint is unavailable, "
-    + "explain the limitation and use REST with the specified account and exact repository.",
+for (const wrongDecision of [
+  { transport: "rest" },
+  { access: "read_write" },
+  { unavailable_endpoint: "ignore" },
+  { rest_approval: "not_required" },
+  { rest_approval: "after_use" },
+  { rest_account: "any_available_account" },
+  { rest_repository: "example/other-repo" },
 ]) {
-  assert.equal(githubIntake(answer, connectorContext).pass, false);
+  const answer = JSON.stringify({ ...connectorDecision, ...wrongDecision });
+  assert.equal(githubIntake(answer, connectorContext).pass, false, answer);
 }
+assert.equal(githubIntake("{invalid JSON}", connectorContext).pass, false);

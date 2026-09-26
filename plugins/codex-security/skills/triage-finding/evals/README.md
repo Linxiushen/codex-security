@@ -49,7 +49,8 @@ The eval target is `fixtures/repo`, a small synthetic Express app with both true
 - `assertions/missing-input.js` checks that bare invocation asks for a finding,
   names supported input formats, and does not emit triage result JSON.
 - `tests/github-rest-intake.yaml` opts out of default JSON assertions for GitHub repository-source routing cases.
-- `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, explicit Connector selection with approved REST fallback, and explicit-only GitHub Issue handling.
+- `assertions/github-rest-intake.js` checks GitHub source selection, REST endpoint selection, Codex project repository inference, advisory/private-report handling, the structured transport decision for an explicit Connector request, and explicit-only GitHub Issue handling.
+  Only the explicit-Connector case requests a `github-transport-decision/v0` JSON object. The grader checks Connector selection, read-only access, an explanation of unavailable endpoints, and approval for the specified account and exact repository before using REST. It parses the decision fields so sentence order and line wrapping do not affect the grade.
 
 ## Calibration Dataset
 
