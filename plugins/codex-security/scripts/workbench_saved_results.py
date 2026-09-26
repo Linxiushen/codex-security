@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
     _finding_strength,
+    _normalize_unsealed_open_questions,
     _populate_unsealed_artifact_envelope,
     _populate_unsealed_manifest_envelope,
     _prepare_scan_finalization,
@@ -656,7 +657,15 @@ def merge_saved_results(
                 original = dict(record)
                 if "id" not in item:
                     original.pop("id", None)  # Canonical publication can assign an ID.
-                if original == item:
+                if field == "openQuestions":
+                    # Compare the same canonical form that publication writes.
+                    previous_question = {"openQuestions": [original]}
+                    source_question = {"openQuestions": [item]}
+                    _normalize_unsealed_open_questions(previous_question)
+                    _normalize_unsealed_open_questions(source_question)
+                    if previous_question == source_question:
+                        return True
+                elif original == item:
                     return True
         return False
 

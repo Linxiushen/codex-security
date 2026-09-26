@@ -88,3 +88,42 @@ for (const resume of [false, true]) {
     }
   });
 }
+
+for (const outcome of ["completion", "recovery", "frozen recovery"]) {
+  test(`open questions are retained once through ${outcome}`, async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "question-coverage-"));
+    try {
+      const { scanDir } = await publishCoverageFixture(root, "complete", {
+        stopAfterDraft: outcome !== "completion",
+        interruptPublication: outcome === "frozen recovery",
+        questionRows: [
+          "  Which deployment controls apply?  ",
+          {
+            question: "  Which runtime settings apply?  ",
+            followUpPrompt: " Check the deployment settings. ",
+          },
+        ],
+      });
+      const coverage = JSON.parse(
+        await readFile(path.join(scanDir, "coverage.json"), "utf8"),
+      );
+      assert.deepEqual(
+        coverage.openQuestions.map((item) => item.question),
+        ["Which deployment controls apply?", "Which runtime settings apply?"],
+      );
+      assert.equal(
+        coverage.openQuestions[1].followUpPrompt,
+        " Check the deployment settings. ",
+      );
+      for (const question of coverage.openQuestions) {
+        assert.equal(
+          question.provenance.workerId,
+          coverage.reviews[0].workerId,
+        );
+        assert.equal(question.provenance.attempt, coverage.reviews[0].attempt);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

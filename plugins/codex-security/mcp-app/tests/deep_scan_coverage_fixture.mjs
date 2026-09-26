@@ -35,6 +35,8 @@ export async function publishCoverageFixture(
     continueAfterResume = false,
     stopAfterDraft = false,
     receiptRetry = false,
+    questionRows,
+    interruptPublication = false,
   } = {},
 ) {
   const runtimePath = path.join(root, "fixture-runtime.mjs");
@@ -68,17 +70,32 @@ export async function publishCoverageFixture(
     `[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = ${statuses.length}\nmax_discovery_runs = ${statuses.length}\n`,
   );
   const runWorkbench = async (args) => {
-    const { stdout } = await exec(
-      process.env.PYTHON || "python3",
-      [path.join(pluginRoot, "scripts", "workbench_db.py"), ...args],
-      {
-        env: {
-          ...process.env,
-          CODEX_HOME: codexHome,
-          CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
-        },
+    const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
+    const command = [workbenchPath, ...args];
+    if (interruptPublication && args[0] === "fail-scan") {
+      command.unshift(
+        "-c",
+        `
+import os, runpy, sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import workbench_saved_results
+
+def interrupt_publication(*args, **kwargs):
+    raise OSError("Synthetic publication interruption.")
+
+workbench_saved_results._write_prepared_scan_finalization = interrupt_publication
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+`,
+      );
+    }
+    const { stdout } = await exec(process.env.PYTHON || "python3", command, {
+      env: {
+        ...process.env,
+        CODEX_HOME: codexHome,
+        CODEX_SECURITY_STATE_DIR: path.join(root, "state"),
       },
-    );
+    });
     return JSON.parse(stdout);
   };
   const store = new WorkbenchDeepScanStore(runWorkbench);
@@ -176,9 +193,9 @@ export async function publishCoverageFixture(
             },
           ]
         : [],
-      openQuestions: pending
-        ? [{ question: `Deployment question ${index + 1}.` }]
-        : [],
+      openQuestions:
+        questionRows ??
+        (pending ? [{ question: `Deployment question ${index + 1}.` }] : []),
     };
     for (const field of [
       "surfaces",
@@ -186,7 +203,8 @@ export async function publishCoverageFixture(
       "deferred",
       "openQuestions",
     ]) {
-      for (const item of coverage[field])
+      for (const item of coverage[field]) {
+        if (typeof item === "string") continue;
         item.provenance = {
           description: `Original ${field} context.`,
           details: { evidence: ["source review"] },
@@ -195,6 +213,7 @@ export async function publishCoverageFixture(
           sourceId: "untrusted-source",
           candidateId: "untrusted-candidate",
         };
+      }
     }
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(
@@ -429,13 +448,14 @@ export async function publishCoverageFixture(
     }
   }
   if (stopAfterDraft) {
-    await runWorkbench([
+    const stopped = await runWorkbench([
       "fail-scan",
       "--scan-id",
       run.scanId,
       "--message",
       "Synthetic stop after parent draft.",
     ]);
+    assert.equal(stopped.scan.resultsRecoveryNeeded, interruptPublication);
     const recovered = await runWorkbench([
       "recover-scan-results",
       "--scan-id",

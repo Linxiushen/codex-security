@@ -214,3 +214,50 @@ def test_previous_attempt_resolution_does_not_clear_current_gap(
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == (0 if attempt == 1 else 1)
     assert result.read_bytes() == original
+
+
+def test_recovery_compares_open_questions_using_canonical_normalization(
+    workbench_api, workbench_db, publication_scan
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    questions = [
+        "  Which deployment controls apply?  ",
+        {"question": "  Which runtime settings apply?  ", "followUpPrompt": " \t"},
+    ]
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {**scan.coverage, "openQuestions": questions},
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected = [
+        {"question": question, "provenance": {"workerId": worker_id, "attempt": 1}}
+        for question in ("Which deployment controls apply?", "Which runtime settings apply?")
+    ]
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "complete"}],
+                "openQuestions": projected,
+            }
+        )
+    )
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    assert coverage["openQuestions"] == projected
+    assert result.read_bytes() == original
