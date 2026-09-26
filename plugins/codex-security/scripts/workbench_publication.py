@@ -16,6 +16,7 @@ from urllib.parse import quote
 
 from finalize_scan_contract import (
     ContractError,
+    SealedArtifactError,
     csv_cell,
     finalize_scan,
     finding_candidate_id,
@@ -470,6 +471,8 @@ def write_csv_export(
             "csv",
             output.getvalue().encode("utf-8"),
         )
+    except SealedArtifactError as exc:
+        raise SystemExit(str(exc)) from exc
     except ContractError as exc:
         raise SystemExit(
             "exports: expected a regular directory inside the scan directory."

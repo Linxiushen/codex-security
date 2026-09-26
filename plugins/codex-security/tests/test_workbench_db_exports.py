@@ -1185,6 +1185,7 @@ def test_csv_export_preserves_a_sealed_export(tmp_path: Path, workbench_api) -> 
     )
 
     assert rejected["returncode"] != 0
+    assert "CSV output path cannot overwrite a sealed scan artifact" in rejected["stderr"]
     assert csv_path.read_bytes() == sealed_csv
     assert manifest_path.read_bytes() == sealed_manifest
     exported = run_workbench(state_dir, "export-findings", "--scan-id", scan_id, "--format", "json")
