@@ -608,6 +608,110 @@ def merge_saved_results(
             raise ContractError("Frozen stopped-scan checkpoint set is incomplete.")
 
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
+    frozen_parent_projections = {
+        relative: draft["coverage"]
+        for relative, draft, _ in sources
+        if frozen_source_digests is not None
+        and relative.startswith("checkpoints/")
+        and isinstance(draft["coverage"].get("reviews"), list)
+    }
+    projected_coverages = [
+        parent["coverage"] if parent else {},
+        *frozen_parent_projections.values(),
+    ]
+    # V1 persists the review projection in the parent, without reducer sourceCoverage.
+    reviewed_attempts = {
+        (review.get("workerId"), review.get("attempt"))
+        for projected in projected_coverages
+        if isinstance(reviews := projected.get("reviews"), list)
+        for review in reviews
+        if isinstance(review, dict)
+        and isinstance(review.get("workerId"), str)
+        and isinstance(review.get("attempt"), int)
+    }
+
+    def coverage_receipts(item: dict[str, Any], worker: Any, relative: str) -> Any:
+        refs = item.get("receiptRefs", [])
+        if not isinstance(refs, list):
+            return refs
+        directory = Path(relative).parent
+        if directory.name == "checkpoints":
+            directory = directory.parent
+        output = Path(worker["artifact_dir"]).relative_to(scan_dir)
+        worker_root = output.parent if output.name == "output" else output
+        archive_prefix = (worker_root / "attempts").as_posix() + "/"
+        return [
+            f"{directory.as_posix()}/{ref}"
+            if isinstance(ref, str) and not ref.startswith(archive_prefix)
+            else ref
+            for ref in refs
+        ]
+
+    def coverage_record_retained(field: str, item: dict[str, Any]) -> bool:
+        for projection in projected_coverages:
+            records = projection.get(field, [])
+            for record in records if isinstance(records, list) else []:
+                if not isinstance(record, dict):
+                    continue
+                original = dict(record)
+                if "id" not in item:
+                    original.pop("id", None)  # Canonical publication can assign an ID.
+                if original == item:
+                    return True
+        return False
+
+    def project_missing_record(
+        field: str, item: dict[str, Any], index: int, worker: Any, source: dict[str, Any]
+    ) -> dict[str, Any]:
+        # Match projectDiscoveryCoverage so recovered holes retain source ownership.
+        prefix = f"{worker['id']}-attempt-{worker['attempt']}"
+        result = copy.deepcopy(item)
+        provenance = result.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = {}
+        for key in ("workerId", "attempt", "sourceId", "candidateId"):
+            provenance.pop(key, None)
+        provenance.update(workerId=worker["id"], attempt=worker["attempt"])
+        result["provenance"] = provenance
+        for key, name in (("id", "sourceId"), ("candidateId", "candidateId")):
+            if key in item:
+                result["provenance"][name] = item[key]
+        if isinstance(item.get("candidateId"), str):
+            candidate_digest = hashlib.sha256(item["candidateId"].encode()).hexdigest()
+            result["candidateId"] = f"{prefix}-candidate-{candidate_digest}"
+        if field == "surfaces":
+            result["id"] = f"{prefix}-surface-{index}"
+        elif field == "deferred":
+            result["id"] = f"{prefix}-deferred-{index}"
+            if isinstance(item.get("surfaceIds"), list):
+                surfaces = source.get("surfaces", [])
+                surface_ids = {
+                    surface["id"]: f"{prefix}-surface-{offset}"
+                    for offset, surface in enumerate(
+                        surfaces if isinstance(surfaces, list) else [], 1
+                    )
+                    if isinstance(surface, dict) and isinstance(surface.get("id"), str)
+                }
+                for projection in projected_coverages:
+                    surfaces = projection.get("surfaces", [])
+                    for surface in surfaces if isinstance(surfaces, list) else []:
+                        if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
+                            continue
+                        provenance = surface.get("provenance", {})
+                        if (
+                            isinstance(provenance, dict)
+                            and provenance.get("workerId") == worker["id"]
+                            and provenance.get("attempt") == worker["attempt"]
+                            and isinstance(provenance.get("sourceId"), str)
+                        ):
+                            surface_ids[provenance["sourceId"]] = surface["id"]
+                result["surfaceIds"] = [
+                    surface_ids.get(value, value) if isinstance(value, str) else value
+                    for value in item["surfaceIds"]
+                ]
+        return result
+
+    workers_by_id = {worker["id"]: worker for worker in workers}
     latest_reducer_key = (
         (reducer["completed_at"] or "", reducer["id"], int(reducer["attempt"] or 0))
         if reducer is not None and latest_reducer in drafts_by_path
@@ -727,8 +831,32 @@ def merge_saved_results(
 
     all_sources = ([("parent", parent, None)] if parent else []) + sources
     current_drafts = ([(None, parent)] if parent else []) + [
-        (worker_id, draft) for relative, draft, worker_id in sources if relative in current_results
+        (worker_id, draft)
+        for relative, draft, worker_id in sources
+        if relative in current_results or relative in frozen_parent_projections
     ]
+
+    def coverage_candidate(
+        owner: str | None, item: dict[str, Any]
+    ) -> tuple[str | None, str] | None:
+        candidate_id = item.get("candidateId")
+        provenance = item.get("provenance")
+        if owner is None and isinstance(provenance, dict):
+            source_owner = provenance.get("workerId")
+            source_candidate = provenance.get("candidateId", candidate_id)
+            if (
+                isinstance(source_owner, str)
+                and source_owner in workers_by_id
+                and isinstance(provenance.get("attempt"), int)
+                and workers_by_id[source_owner]["attempt"] == provenance["attempt"]
+                and (source_owner, provenance["attempt"]) in reviewed_attempts
+                and isinstance(source_candidate, str)
+            ):
+                return source_owner, source_candidate
+        if isinstance(candidate_id, str):
+            return owner, candidate_id
+        return None
+
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         for finding in draft["findings"]:
@@ -745,8 +873,9 @@ def merge_saved_results(
                     isinstance(item, dict)
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
+                    and (candidate := coverage_candidate(owner, item)) is not None
                 ):
-                    resolved.setdefault((owner, item["candidateId"]), item["disposition"])
+                    resolved.setdefault(candidate, item["disposition"])
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     for draft in [parent] if parent else []:
@@ -960,18 +1089,25 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded:
+        worker = workers_by_id.get(worker_id)
+        reviewed = (
+            worker is not None
+            and worker["status"] == "succeeded"
+            and worker["merge_state"] == "merged"
+            and (worker_id, worker["attempt"]) in reviewed_attempts
+        )
+        if superseded and relative not in frozen_parent_projections:
             continue
-        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
+        for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
             items = draft["coverage"].get(field, [])
-            if not isinstance(items, list):
+            if not isinstance(items, list) or (field == "reviews" and not items):
                 continue
             output = coverage.setdefault(field, [])
             if not isinstance(output, list):
                 # Keep malformed canonical collections for the existing finalizer's
                 # recovery and warnings rather than silently changing its contract.
                 continue
-            for item in items:
+            for index, item in enumerate(items, 1):
                 if field == "openQuestions" and isinstance(item, str):
                     item = {"question": item.strip()}
                 if (
@@ -995,9 +1131,16 @@ def merge_saved_results(
                             history.append(copy.deepcopy(finding))
                 if (
                     isinstance(item, dict)
-                    and (worker_id, item.get("candidateId")) in resolved
+                    and coverage_candidate(worker_id, item) in resolved
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
+                    continue
+                if reviewed and isinstance(item, dict) and field != "reviews":
+                    item = project_missing_record(field, item, index, worker, draft["coverage"])
+                if field == "surfaces" and worker is not None and isinstance(item, dict):
+                    item = copy.deepcopy(item)
+                    item["receiptRefs"] = coverage_receipts(item, worker, relative)
+                if reviewed and isinstance(item, dict) and coverage_record_retained(field, item):
                     continue
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)
