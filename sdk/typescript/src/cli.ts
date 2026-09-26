@@ -2091,9 +2091,14 @@ export async function main(
         await history(
           ["list-repositories"],
           async (value): Promise<JsonObject> => {
-            const target = (value["repositories"] as JsonObject[]).find(
-              (entry) => entry["targetPath"] === canonicalRepository,
-            );
+            const repositories = value["repositories"] as JsonObject[];
+            const target =
+              repositories.find(
+                (entry) => entry["targetPath"] === repository,
+              ) ??
+              repositories.find(
+                (entry) => entry["targetPath"] === canonicalRepository,
+              );
             const findings =
               target === undefined
                 ? []
