@@ -7,7 +7,7 @@ description: Use when the user asks for a deep, exhaustive, multi-pass, or varia
 
 Use `start_codex_security_deep_scan` to run repeated independent workers against the exact requested target and scope. Each worker reads `../../references/core-scan.md` directly and completes the ordinary Standard audit, saving checkpoints as results arrive and a final scan draft when the audit finishes.
 
-The coordinator combines the finished findings and writes the parent scan's unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before returning `{ manifestPath }`. The final report identifies the configured directories and exclusions alongside the findings. Successful coordination does not imply complete analytical coverage: accepted worker gaps, exclusions, open questions, and receipt references remain in the parent coverage with worker and attempt provenance. A partial or unknown review is not cleared by a later clean independent review.
+The coordinator combines the finished findings and writes the parent scan's unsealed `scan-manifest.json`, `findings.json`, and `coverage.json` before returning `{ manifestPath }`. The final report identifies the configured directories and exclusions alongside the findings.
 
 ## Phase Ownership
 
