@@ -17,7 +17,7 @@ node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-The runner stages the skill, references, schemas, policy-helper launchers, helper bundle and native bindings. This lets the mandatory `SECURITY.md` resolver run inside the readable runtime without exposing the label-bearing eval harness. Rebuild the plugin runtime after changing its helper source. The host build requires the Rust toolchain described in [`native/README.md`](../../../../native/README.md).
+Rebuild the plugin runtime after changing its helper source. The host build requires the Rust toolchain described in [`native/README.md`](../../../../native/README.md).
 
 Install the pinned SastBench checkout and hydrate all 275 repository revisions:
 
