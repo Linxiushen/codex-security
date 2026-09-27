@@ -22,6 +22,7 @@ const bundle = await build({
   bundle: true,
   stdin: {
     contents: `export * from ${JSON.stringify(fileURLToPath(new URL("../src/native-scan.ts", import.meta.url)))};
+      export { prepareAmbientRuntime } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/execution-preparation.ts", import.meta.url)))};
       export { createPermissionCheckedCodex } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/permission-profile.ts", import.meta.url)))};
       export { scanRuntimeCodexConfig } from ${JSON.stringify(fileURLToPath(new URL("../../../../sdk/typescript/src/api.ts", import.meta.url)))};`,
     resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
@@ -63,6 +64,7 @@ const {
   nativeScanConfiguration,
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
+  prepareAmbientRuntime,
 } = module.exports;
 
 const fixtureRepository = await realpath(
@@ -549,7 +551,9 @@ test("native scans preserve selected Codex homes and saved settings", async () =
           saved ? "synthetic-saved" : model,
         );
         assert.equal(prepared.options.workers, saved ? 6 : workers);
-        const runtime = await prepared.client.dependencies.prepareRuntime({});
+        const runtime = await prepareAmbientRuntime(
+          prepared.client.dependencies.ambientExecution,
+        );
         try {
           const expectedHome = await realpath(home);
           assert.equal(runtime.codexHome, expectedHome);
@@ -672,9 +676,11 @@ if (process.argv.includes("app-server")) {
             },
           });
           assert.equal(prepared.options.workers, resumed ? 6 : workers);
-          const runtime = await prepared.client.dependencies.prepareRuntime({});
+          const runtime = await prepareAmbientRuntime(
+            prepared.client.dependencies.ambientExecution,
+          );
           try {
-            const sdk = prepared.client.dependencies.createCodex({
+            const sdk = createPermissionCheckedCodex({
               codexPathOverride: executable,
               config: scanRuntimeCodexConfig(
                 prepared.client.config.codexOverrides,
@@ -1130,7 +1136,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
             prepared.client.config.codexOverrides.model_provider,
             selected ? providerName : undefined,
           );
-          const sdk = prepared.client.dependencies.createCodex({
+          const sdk = createPermissionCheckedCodex({
             codexPathOverride: executable,
             config: scanRuntimeCodexConfig(
               prepared.client.config.codexOverrides,
@@ -1198,7 +1204,7 @@ console.log(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 0, c
         shell_environment_policy: { set: { "SYNTHETIC.SETTING": "selected" } },
         features: { plugins: false },
       };
-      const configuredSdk = prepared.client.dependencies.createCodex({
+      const configuredSdk = createPermissionCheckedCodex({
         codexPathOverride: executable,
         env: {
           ...prepared.client.dependencies.environment,

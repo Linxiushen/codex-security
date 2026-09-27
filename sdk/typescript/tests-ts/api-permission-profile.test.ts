@@ -27,6 +27,7 @@ async function fixture(
   resumed: boolean,
   scenario: Scenario,
   surface: "sdk" | "cli",
+  replaceEnvironmentDuringPreparation = false,
 ) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -68,7 +69,7 @@ async function fixture(
       "    return target;",
       "  };",
       '  for (let index = 0; index < args.length; index++) if (["-c", "--config"].includes(args[index])) merge(config, parse(args[++index]));',
-      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions });',
+      'record({ kind: args.includes("mcp") ? "mcp" : args.includes("app-server") ? "preflight" : "exec", args, cwd: process.cwd(), surface: process.env.CODEX_SECURITY_SURFACE, profile: config.default_permissions, permissions: config.permissions, context: process.env.SYNTHETIC_EXECUTION_CONTEXT, apiKey: process.env.CODEX_API_KEY });',
       'if (args.includes("mcp")) { console.log("[]"); process.exit(0); }',
       'if (args.includes("app-server")) {',
       '  require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {',
@@ -162,6 +163,7 @@ async function fixture(
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       CODEX_CLI_PATH: executable,
       OPENAI_API_KEY: "synthetic-fixture-key",
+      SYNTHETIC_EXECUTION_CONTEXT: "selected-scan",
     }).filter(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
@@ -193,7 +195,14 @@ async function fixture(
         environment,
         persistentCredentialHome: true,
       }),
-      resolvePluginPython: async () => process.execPath,
+      resolvePluginPython: async () => {
+        if (replaceEnvironmentDuringPreparation) {
+          environment["CODEX_CLI_PATH"] = join(root, "later-executable");
+          environment["OPENAI_API_KEY"] = "synthetic-later-key";
+          environment["SYNTHETIC_EXECUTION_CONTEXT"] = "another-scan";
+        }
+        return process.execPath;
+      },
       prepareOutputDir: async () => scanDir,
       acquireScanExecution: async () => () => {},
       repositoryRevision: async () => null,
@@ -504,6 +513,31 @@ test.each(["rejected", "fallback"] as const)(
       expect(h.completedArtifacts.size).toBe(4);
       for (const [file, bytes] of h.completedArtifacts)
         expect(await readFile(join(h.scanDir, file))).toEqual(bytes);
+    } finally {
+      await h.close();
+    }
+  },
+);
+
+test.each([false, true])(
+  "keeps selected execution isolated from later environment changes (resumed: %p)",
+  async (resumed) => {
+    const h = await fixture("discovery", resumed, "fallback", "sdk", true);
+    try {
+      await expect(h.run()).rejects.toBeInstanceOf(ScanPermissionError);
+      const observations = await h.observations();
+      expect(observations.filter(({ kind }) => kind === "exec")).toHaveLength(
+        1,
+      );
+      for (const child of observations) {
+        expect(child.context).toBe("selected-scan");
+        expect(child.apiKey).toBe("synthetic-fixture-key");
+      }
+      expect(
+        observations
+          .find(({ kind }) => kind === "exec")
+          .args.includes("resume"),
+      ).toBe(resumed);
     } finally {
       await h.close();
     }

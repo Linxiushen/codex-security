@@ -19,7 +19,6 @@ import {
 import {
   deepMerge,
   hasCommandAuth,
-  inlineToml,
   mergedCodexConfig,
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
@@ -28,6 +27,11 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
+import { definedEnvironment } from "./execution-auth.js";
+import {
+  prepareExecutionSource,
+  prepareReadOnlyExecution,
+} from "./execution-preparation.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   compactFinding,
@@ -582,24 +586,16 @@ async function startReadOnlyCodexThread(
         "Remove the conflicting provider configuration or select command authentication through codexOverrides.",
     );
   }
-  const sdkConfig = { ...config };
+  const prepared = prepareReadOnlyExecution(
+    config ?? {},
+    options.inheritedPermissions,
+  );
+  const sdkConfig = prepared.config;
   if (commandAuth) delete sdkConfig["model_providers"];
-  const configOverrides = commandAuth
-    ? modelProviderConfigOverride(providerConfig)
-    : [];
-  if (options.inheritedPermissions !== undefined) {
-    delete sdkConfig["permissions"];
-    delete sdkConfig["projects"];
-    delete sdkConfig["sandbox_mode"];
-    sdkConfig["default_permissions"] = "codex_security_comparison";
-    configOverrides.push(
-      `permissions.codex_security_comparison=${inlineToml({
-        extends: ":read-only",
-        filesystem: readOnlyFilesystem(options.inheritedPermissions.filesystem),
-        network: { enabled: false },
-      })}`,
-    );
-  }
+  const configOverrides = [
+    ...(commandAuth ? modelProviderConfigOverride(providerConfig) : []),
+    ...prepared.overrides,
+  ];
   const environment =
     options.codex === undefined && options.createCodex === undefined
       ? await comparisonEnvironment(
@@ -613,6 +609,16 @@ async function startReadOnlyCodexThread(
       : undefined;
   const command =
     environment === undefined ? undefined : resolveCodexCommand(environment);
+  const execution =
+    command === undefined
+      ? undefined
+      : prepareExecutionSource({
+          command,
+          configuration: providerConfig,
+          environment: environment!,
+          auth: options.auth,
+          preserveProviderEnvironment: options.preserveProviderEnvironment,
+        });
   const codex =
     options.codex ??
     (await (options.createCodex ?? ((settings) => new Codex(settings)))({
@@ -620,13 +626,12 @@ async function startReadOnlyCodexThread(
         ? {}
         : {
             codexPathOverride: executablePathForSpawn(command.command),
-            env: environment,
+            env: definedEnvironment(execution!.environment),
             // The SDK forwards apiKey as CODEX_API_KEY for Codex exec.
-            apiKey: options.preserveProviderEnvironment
-              ? undefined
-              : environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
-                environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
-                undefined,
+            apiKey:
+              execution!.externalProvider === null
+                ? (execution!.apiKey ?? undefined)
+                : undefined,
           }),
       ...(configOverrides.length === 0 ? {} : { configOverrides }),
       config: {
@@ -670,21 +675,6 @@ async function startReadOnlyCodexThread(
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
   });
-}
-
-function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
-  return Object.fromEntries(
-    Object.entries(filesystem).map(([path, access]) => [
-      path,
-      access === "write"
-        ? "read"
-        : typeof access === "object" &&
-            access !== null &&
-            !Array.isArray(access)
-          ? readOnlyFilesystem(access as JsonObject)
-          : access,
-    ]),
-  );
 }
 
 export async function runReadOnlyCodex(

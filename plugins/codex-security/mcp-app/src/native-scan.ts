@@ -1,44 +1,29 @@
-import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { parse as parseToml } from "smol-toml";
 import {
   CodexSecurity,
-  selectedScanEnvironment,
   type ScanOptions,
 } from "../../../../sdk/typescript/src/api.js";
-import {
-  hasCommandAuth,
-  scanCompositionOverrides,
-  scanModelProvider,
-  type JsonObject,
-} from "../../../../sdk/typescript/src/config.js";
+import type { JsonObject } from "../../../../sdk/typescript/src/config.js";
 import {
   ScanSettingsSchema,
   type DeepScanOptions,
 } from "../../../../sdk/typescript/src/scan-settings.js";
-import {
-  accountStatus,
-  configuredCodexHome,
-} from "../../../../sdk/typescript/src/auth.js";
+import { configuredCodexHome } from "../../../../sdk/typescript/src/auth.js";
 import { CodexSecurityError } from "../../../../sdk/typescript/src/errors.js";
 import { resolveDeepScanConfig } from "../../../../sdk/typescript/src/deep-config.js";
 import { ScanTransportClosedError } from "../../../../sdk/typescript/src/scan-execution.js";
 import type { ScanResult } from "../../../../sdk/typescript/src/result.js";
-import {
-  cleanupSdkDirectory,
-  createIsolatedHome,
-  createMarketplace,
-  MARKETPLACE_NAME,
-  PLUGIN_NAME,
-  pluginMetadata,
-} from "../../../../sdk/typescript/src/runtime.js";
 import {
   resolveCodexPath,
   resolveTrustedCodex,
   snapshotNativeEnvironment,
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
-import { createPermissionCheckedCodex } from "../../../../sdk/typescript/src/permission-profile.js";
+import {
+  prepareAmbientExecution,
+  nativeScanConfiguration,
+} from "../../../../sdk/typescript/src/execution-preparation.js";
+export { nativeScanConfiguration } from "../../../../sdk/typescript/src/execution-preparation.js";
 import type { ScanResults } from "./types.js";
 
 export interface NativeScanInput {
@@ -196,90 +181,29 @@ export async function prepareNativeScan(
     input,
     deep.settings.subagents,
   );
-  config.approval_policy = "never";
-  let modelProvider = scanModelProvider(config);
-  const providers = config.model_providers as JsonObject | undefined;
-  if (modelProvider === undefined && providers?.openai !== undefined) {
-    config.model_provider = "openai";
-    modelProvider = "openai";
-  }
-  const provider = providers?.[
-    typeof modelProvider === "string" ? modelProvider : "openai"
-  ] as JsonObject | undefined;
-  const configuredProvider =
-    hasCommandAuth(config) ||
-    provider?.env_key !== undefined ||
-    (provider?.requires_openai_auth !== true &&
-      ((modelProvider !== undefined && modelProvider !== "openai") ||
-        provider !== undefined));
-  if (!configuredProvider && (options.auth ?? "auto") === "auto") {
-    if (config.forced_login_method === "chatgpt") {
-      options.auth = "chatgpt";
-    } else if (
-      !environment.CODEX_API_KEY?.trim() &&
-      environment.OPENAI_API_KEY?.trim()
-    ) {
-      const status = await accountStatus(
-        { command: codex.executable },
-        selectedScanEnvironment(environment, "chatgpt"),
-        signal,
-        config,
-      );
-      if (status.authenticated) options.auth = "chatgpt";
-      else if (!/not logged in|unauthenticated/i.test(status.details))
-        throw new CodexSecurityError(
-          status.details || "Could not determine Codex account status.",
-        );
-    }
-  }
-  const selectedEnvironment = configuredProvider
-    ? environment
-    : selectedScanEnvironment(environment, options.auth, modelProvider);
-  if (!configuredProvider && selectedEnvironment.CODEX_API_KEY?.trim())
-    delete selectedEnvironment.OPENAI_API_KEY;
+  const ambientExecution = await prepareAmbientExecution(
+    {
+      environment,
+      command: { command: codex.executable },
+      configuration: config,
+      auth: options.auth,
+      pluginRoot: input.pluginRoot,
+    },
+    signal,
+  );
+  options.auth = ambientExecution.auth;
+  const selectedEnvironment = ambientExecution.environment;
+  const configuredProvider = ambientExecution.preserveProviderEnvironment;
   const client = new CodexSecurity(
     {
       pluginPath: input.pluginRoot,
       pythonPath: input.pythonPath,
-      codexOverrides: config,
+      codexOverrides: ambientExecution.configuration,
     },
     {
-      createCodex: createPermissionCheckedCodex,
       environment: selectedEnvironment,
       inheritedPermissions,
-      prepareRuntime: async (_config, runtimeSignal) => {
-        const codexHome = await realpath(
-          environment.CODEX_HOME || configuredCodexHome(environment),
-        );
-        const bootstrapWorkspace = await createIsolatedHome();
-        try {
-          const marketplaceRoot = await createMarketplace(
-            bootstrapWorkspace,
-            input.pluginRoot,
-            runtimeSignal,
-          );
-          const pluginRoot = join(marketplaceRoot, "plugins", PLUGIN_NAME);
-          return {
-            codexHome,
-            persistentCredentialHome: true,
-            preserveCodexHomeConfig: true,
-            bootstrapWorkspace,
-            configPath: join(bootstrapWorkspace, "config-preflight.toml"),
-            environment: { ...selectedEnvironment, CODEX_HOME: codexHome },
-            credentialsAvailable: false,
-            plugin: {
-              pluginRoot,
-              installedRoot: pluginRoot,
-              marketplaceRoot,
-              marketplaceName: MARKETPLACE_NAME,
-              ...(await pluginMetadata(pluginRoot)),
-            },
-          };
-        } catch (error) {
-          await cleanupSdkDirectory(bootstrapWorkspace);
-          throw error;
-        }
-      },
+      ambientExecution,
     },
     { surface: "sdk" },
   );
@@ -308,42 +232,6 @@ export async function prepareNativeScan(
       },
     },
   };
-}
-
-export async function nativeScanConfiguration(
-  environment: NodeJS.ProcessEnv,
-  input: Pick<NativeScanInput, "recipe" | "model" | "reasoningEffort">,
-  subagents: number,
-): Promise<JsonObject> {
-  if (input.recipe?.config !== undefined)
-    return scanCompositionOverrides(
-      input.recipe.config as JsonObject,
-      subagents,
-    );
-  const ambientPath = join(
-    environment.CODEX_HOME || configuredCodexHome(environment),
-    "config.toml",
-  );
-  const ambient = await readFile(ambientPath, "utf8").catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    },
-  );
-  const selected = environment.CODEX_SECURITY_CONFIG_PATH
-    ? parseToml(await readFile(environment.CODEX_SECURITY_CONFIG_PATH, "utf8"))
-    : {};
-  const config = scanCompositionOverrides(
-    {
-      ...parseToml(ambient),
-      ...selected,
-    } as JsonObject,
-    subagents,
-  );
-  if (input.model) config.model = input.model;
-  if (input.reasoningEffort)
-    config.model_reasoning_effort = input.reasoningEffort;
-  return config;
 }
 
 function waitForScan(

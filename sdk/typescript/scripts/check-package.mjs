@@ -206,6 +206,8 @@ const distFiles = new Set(
     "deep-scan-checkpoint",
     "deep-scan-lifecycle",
     "scan-execution",
+    "execution-auth",
+    "execution-preparation",
     "scan-merge",
     "scan-semantics",
     "semantic-models",
