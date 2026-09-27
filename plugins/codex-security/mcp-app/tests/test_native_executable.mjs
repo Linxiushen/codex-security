@@ -84,8 +84,12 @@ async function testCodexHomePathsStayBoundToOriginalDirectory() {
     );
   }
 
+  // Root-relative Windows paths use the cwd drive, which can differ from TEMP.
   const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-native-home-"),
+    path.join(
+      process.platform === "win32" ? process.cwd() : tmpdir(),
+      "codex-security-native-home-",
+    ),
   );
   temporaryRoots.push(root);
   const target = path.join(root, "target", "nested");
