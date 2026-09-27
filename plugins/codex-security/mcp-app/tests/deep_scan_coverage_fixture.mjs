@@ -255,12 +255,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       "Synthetic review evidence.\n",
     );
     const resultPath = path.join(artifactDir, "result.json");
-    const bytes = JSON.stringify({
-      scanId: run.scanId,
-      complete: true,
-      findings: index === 0 ? (retryFindings?.[1] ?? []) : [],
-      coverage,
-    });
     if (receiptRetry) {
       await recordCodexSecurityWorkerScanDraft(
         {
@@ -305,7 +299,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           layout: "worker",
           scanId: run.scanId,
         },
-        JSON.parse(bytes),
+        {
+          scanId: run.scanId,
+          complete: true,
+          findings: index === 0 ? (retryFindings?.[1] ?? []) : [],
+          coverage,
+        },
       );
       for (const name of await readdir(path.join(artifactDir, "checkpoints"))) {
         const checkpointPath = path.join(artifactDir, "checkpoints", name);
