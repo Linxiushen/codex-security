@@ -84,6 +84,7 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
     assert len(pending) == 1
     assert pending[0]["surfaceIds"] == [projected[0]["id"]]
+    assert len(coverage["surfaces"]) == len(projected)
     assert all(surface in coverage["surfaces"] for surface in projected)
     assert result.read_bytes() == original
     published = coverage_path.read_bytes()
@@ -456,11 +457,13 @@ def test_rejected_retry_preserves_original_finding_history(
 
 
 @pytest.mark.parametrize("older_complete", [False, True])
-@pytest.mark.parametrize("recovery", [None, "retry", "missing", "changed", "incomplete", "late"])
+@pytest.mark.parametrize(
+    "recovery", [None, "retry", "missing", "changed", "incomplete", "late", "fallback-late"]
+)
 def test_stopped_recovery_keeps_current_parent_projection(
     workbench_api, workbench_db, publication_scan, monkeypatch, older_complete, recovery
 ):
-    retry_publication = recovery is not None
+    retry_publication = recovery not in {None, "fallback-late"}
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
@@ -536,6 +539,11 @@ def test_stopped_recovery_keeps_current_parent_projection(
     original_sources = {
         path: path.read_bytes() for path in (result, reducer, reducer_checkpoint, obsolete)
     }
+    if recovery == "fallback-late":
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+        obsolete.unlink()
+        del original_sources[obsolete]
     with monkeypatch.context() as interrupted:
         if retry_publication:
 
@@ -562,7 +570,7 @@ def test_stopped_recovery_keeps_current_parent_projection(
         (scan.scan_dir / "coverage.json").write_text(
             json.dumps({**scan.coverage, "openQuestions": ["Late parent content must be ignored."]})
         )
-    elif recovery == "late":
+    elif recovery in {"late", "fallback-late"}:
         late = write_checkpoint(
             scan.scan_dir / "checkpoints",
             {
@@ -582,15 +590,15 @@ def test_stopped_recovery_keeps_current_parent_projection(
     )["scan"]
     assert recovered["resultsRecoveryNeeded"] is False
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    expected_questions = [question]
-    if recovery == "late":
+    expected_questions = [] if recovery == "fallback-late" else [question]
+    if recovery in {"late", "fallback-late"}:
         expected_questions.append({"question": "Late proof gap."})
     if recovery == "incomplete":
         expected_questions.append(
             {"question": "This question was answered by the final parent draft."}
         )
     assert coverage["openQuestions"] == expected_questions
-    assert coverage["reviews"] == reviews
+    assert coverage.get("reviews", []) == ([] if recovery == "fallback-late" else reviews)
     assert [item["id"] for item in coverage["surfaces"]] == (
         ["old-disposition"] if recovery == "incomplete" else []
     )

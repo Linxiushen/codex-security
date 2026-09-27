@@ -667,6 +667,9 @@ def merge_saved_results(
         ]
 
     def coverage_record_retained(field: str, item: dict[str, Any]) -> bool:
+        if field == "surfaces":
+            # Canonical IDs can change while source content and ownership stay the same.
+            item = {key: value for key, value in item.items() if key != "id"}
         records = projected_coverage.get(field, [])
         for record in records if isinstance(records, list) else []:
             if not isinstance(record, dict):
@@ -753,6 +756,8 @@ def merge_saved_results(
             latest_reducer_key = candidate_key
             latest_reducer = result_path
 
+    # A reducer supplies findings but cannot supersede saved parent coverage.
+    saved_parent = parent
     if parent is None and latest_reducer is not None:
         parent = next((draft for relative, draft, _ in sources if relative == latest_reducer), None)
 
@@ -940,15 +945,15 @@ def merge_saved_results(
     for relative, draft, worker_id in all_sources:
         superseded = (
             worker_id is None
-            and parent is not None
-            and parent.get("complete") is not False
+            and saved_parent is not None
+            and saved_parent.get("complete") is not False
             and relative != "parent"
             and (not stopped_parent_seal or relative in parent_preserved_sources)
             and (
                 # Explicit recovery can admit checkpoints written after this parent.
                 frozen_parent_path is None
                 or relative == frozen_parent_path
-                or relative in parent["previousParentCheckpoints"]
+                or relative in saved_parent["previousParentCheckpoints"]
             )
         ) or (
             worker_id is not None
