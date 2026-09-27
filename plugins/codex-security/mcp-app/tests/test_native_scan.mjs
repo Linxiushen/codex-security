@@ -11,8 +11,8 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
-import { test } from "node:test";
+import { delimiter, dirname, join, sep } from "node:path";
+import { after, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -64,6 +64,11 @@ const {
   scanRuntimeCodexConfig,
   createPermissionCheckedCodex,
 } = module.exports;
+
+const fixtureRepository = await realpath(
+  await mkdtemp(join(tmpdir(), "native-scan-repository-")),
+);
+after(() => rm(fixtureRepository, { recursive: true, force: true }));
 
 async function collectNativeEvents(thread, prompt, options) {
   const { events } = await thread.runStreamed(prompt, options);
@@ -126,7 +131,7 @@ function input(id = "parent") {
     scan: {
       scanId: id,
       scanDir: join(tmpdir(), id),
-      targetPath: tmpdir(),
+      targetPath: fixtureRepository,
       userContext: "Review the boundary.",
     },
     threadId: "native-owner",
@@ -135,6 +140,88 @@ function input(id = "parent") {
     parentSandbox: { filesystemDenies: [] },
   };
 }
+
+test("native preparation requires an external executable for fresh and resumed clients", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "native-executable-selection-")),
+  );
+  const repository = join(root, "repository");
+  const bin = join(repository, "bin");
+  const alias = join(root, "bin-alias");
+  const executable = join(
+    bin,
+    process.platform === "win32" ? "codex.exe" : "codex",
+  );
+  const keys = [
+    ...new Set([
+      "CODEX_HOME",
+      "CODEX_CLI_PATH",
+      "CODEX_MANAGED_PACKAGE_ROOT",
+      "LOCALAPPDATA",
+      "CODEX_SECURITY_CONFIG_PATH",
+      "CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH",
+      "PATH",
+      ...Object.keys(process.env).filter((key) => key.toUpperCase() === "PATH"),
+    ]),
+  ];
+  const before = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  try {
+    await mkdir(bin, { recursive: true });
+    await writeFile(executable, "inert executable fixture");
+    await chmod(executable, 0o700);
+    await symlink(
+      bin,
+      alias,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    for (const key of keys) delete process.env[key];
+    process.env.CODEX_HOME = root;
+    process.env.LOCALAPPDATA = root;
+    for (const resumed of [false, true]) {
+      const request = {
+        ...input(),
+        scan: { ...input().scan, targetPath: repository },
+        recipe: {
+          auth: "api-key",
+          ...(resumed ? { config: {}, deepScan: { workers: 2 } } : {}),
+        },
+      };
+      for (const searchPath of [bin, alias]) {
+        delete process.env.CODEX_CLI_PATH;
+        process.env.PATH = searchPath;
+        await assert.rejects(
+          prepareNativeScan(request),
+          /outside the scan target/,
+        );
+      }
+      process.env.CODEX_CLI_PATH = executable;
+      await assert.rejects(
+        prepareNativeScan(request),
+        /outside the scan target/,
+      );
+
+      process.env.CODEX_CLI_PATH = process.execPath;
+      process.env.PATH = [bin, alias, dirname(process.execPath)].join(
+        delimiter,
+      );
+      const originalPath = process.env.PATH;
+      const prepared = await prepareNativeScan(request);
+      const environment = prepared.client.dependencies.environment;
+      assert.equal(
+        await realpath(environment.CODEX_CLI_PATH),
+        await realpath(process.execPath),
+      );
+      assert.equal(environment.PATH, await realpath(dirname(process.execPath)));
+      assert.equal(process.env.PATH, originalPath);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("native waiters join one ordinary scan and detaching leaves it running", async () => {
   const started = Promise.withResolvers();

@@ -38,6 +38,7 @@ import {
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
 import { createPermissionCheckedCodex } from "../../../../sdk/typescript/src/permission-profile.js";
+import { resolveTrustedExecutable } from "../../../../sdk/typescript/src/trusted-executable.js";
 import type { ScanResults } from "./types.js";
 
 export interface NativeScanInput {
@@ -122,8 +123,22 @@ export async function prepareNativeScan(
   input: NativeScanInput,
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
-  const environment = await snapshotNativeEnvironment();
-  environment.CODEX_CLI_PATH = resolveCodexPath(environment);
+  const inheritedEnvironment = await snapshotNativeEnvironment();
+  const codexPath = resolveCodexPath(inheritedEnvironment);
+  const codex = await resolveTrustedExecutable(
+    codexPath,
+    inheritedEnvironment,
+    input.scan.targetPath,
+  );
+  if (codex === null) {
+    throw new CodexSecurityError(
+      `Could not resolve a Codex executable outside the scan target: ${codexPath}`,
+    );
+  }
+  const environment: NodeJS.ProcessEnv = {
+    ...codex.environment,
+    CODEX_CLI_PATH: codex.executable,
+  };
   if (input.stateDirectory)
     environment.CODEX_SECURITY_STATE_DIR = input.stateDirectory;
   const recipe = input.recipe ?? {};
@@ -201,7 +216,7 @@ export async function prepareNativeScan(
       environment.OPENAI_API_KEY?.trim()
     ) {
       const status = await accountStatus(
-        { command: environment.CODEX_CLI_PATH },
+        { command: codex.executable },
         selectedScanEnvironment(environment, "chatgpt"),
         signal,
         config,
