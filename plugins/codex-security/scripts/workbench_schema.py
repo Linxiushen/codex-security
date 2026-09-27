@@ -905,6 +905,15 @@ MIGRATIONS = (
           );
         """,
     ),
+    (
+        43,
+        "snapshot deep scan discovery context",
+        """
+        -- SQL NULL leaves the original context of existing runs unknown;
+        -- JSON null records a new run that explicitly had no context.
+        ALTER TABLE deep_scan_runs ADD COLUMN discovery_user_context_json TEXT;
+        """,
+    ),
 )
 
 

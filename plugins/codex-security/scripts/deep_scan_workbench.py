@@ -453,7 +453,11 @@ def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, A
         "scanId": run["scan_id"],
         "targetPath": scan["target_path"],
         "scope": scan["scope"],
-        "userContext": scan["user_context"],
+        "userContext": (
+            json.loads(run["discovery_user_context_json"])
+            if run["discovery_user_context_json"] is not None
+            else scan["user_context"]
+        ),
         "scanDir": scan["scan_dir"],
         "schemaVersion": run["schema_version"],
         "workflowVersion": run["workflow_version"],
@@ -582,9 +586,9 @@ def ensure_deep_scan_run(
         INSERT INTO deep_scan_runs (
             scan_id, schema_version, workflow_version, status, phase,
             workers, subagents, stop_after_no_new, stop_after_consecutive_errors,
-            max_discovery_runs, max_time_hours,
+            max_discovery_runs, max_time_hours, discovery_user_context_json,
             created_at, updated_at
-        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, 1, ?, 'running', 'setup', ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             scan["id"],
@@ -595,6 +599,7 @@ def ensure_deep_scan_run(
             config["stopAfterConsecutiveErrors"],
             config["maxDiscoveryRuns"],
             config["maxTimeHours"],
+            json.dumps(scan["user_context"]),
             timestamp,
             timestamp,
         ),
@@ -638,8 +643,8 @@ def terminal_deep_scan_for_target_snapshot(
 
     A continuation may safely consume a finished coordinator manifest while the
     parent scan is still open. It must not adopt live orchestration owned by a
-    different thread, or reuse results after the repository snapshot or user
-    context changed.
+    different thread, or reuse results for a different repository snapshot or
+    original discovery context.
     """
     return connection.execute(
         """
@@ -649,7 +654,7 @@ def terminal_deep_scan_for_target_snapshot(
         JOIN workspaces ON workspaces.id = scans.workspace_id
         WHERE scans.target_path = ?
             AND scans.scope = ?
-            AND scans.user_context IS ?
+            AND deep_scan_runs.discovery_user_context_json = ?
             AND scans.mode = 'deep'
             AND scans.status = 'running'
             AND scans.canceled_at IS NULL
@@ -673,7 +678,7 @@ def terminal_deep_scan_for_target_snapshot(
         (
             target_path,
             scope,
-            user_context,
+            json.dumps(user_context),
             revision,
             snapshot_digest,
             target_device,
