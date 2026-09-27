@@ -885,12 +885,14 @@ def merge_saved_results(
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
         # A retry can retain older dispositions beside a newer explicit proof gap.
-        pending = draft["coverage"].get("deferred", [])
-        pending_candidates = {
-            coverage_candidate(owner, item)
-            for item in (pending if isinstance(pending, list) else [])
-            if isinstance(item, dict)
-        }
+        pending_candidates = set()
+        for field in ("deferred", "surfaces"):
+            items = draft["coverage"].get(field, [])
+            for item in items if isinstance(items, list) else []:
+                if isinstance(item, dict) and (
+                    field == "deferred" or item.get("disposition") == "needs_follow_up"
+                ):
+                    pending_candidates.add(coverage_candidate(owner, item))
         for finding in draft["findings"]:
             if (
                 isinstance(finding, dict)
