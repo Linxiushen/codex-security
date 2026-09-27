@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import unicodedata
+from os.path import normcase
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -50,6 +51,11 @@ def _collision_key(name: str) -> str:
     return unicodedata.normalize("NFC", name).upper()
 
 
+def _scope_path(value: str) -> str:
+    # Canonical paths use POSIX separators; scope matching keeps native case semantics.
+    return normcase(value).replace("\\", "/")
+
+
 def project_scan_artifacts(
     parent_scan_id: str,
     source_scan_id: str,
@@ -72,7 +78,7 @@ def project_scan_artifacts(
             finding
             for finding in findings["findings"]
             if any(
-                path_within_scope(location["path"], scope)
+                path_within_scope(_scope_path(location["path"]), _scope_path(scope))
                 for location in finding["locations"]
                 for scope in scan["scope"]["includePaths"]
             )

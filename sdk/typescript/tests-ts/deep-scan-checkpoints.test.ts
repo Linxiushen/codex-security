@@ -84,6 +84,23 @@ test.each([false, true])(
       },
       scanOptions: {},
       onCost() {},
+      async projectChild(childId, childDir) {
+        return {
+          scanId: childId,
+          scanDir: childDir,
+          sourceFindings: [],
+          draft: {
+            scanId,
+            findings: [],
+            coverage: {
+              completeness: "complete",
+              surfaces: [],
+              explicitExclusions: [],
+              deferred: [],
+            },
+          },
+        };
+      },
       createClient: () => ({
         async run(_repository, options = {}) {
           const index = launched++;

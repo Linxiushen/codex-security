@@ -2525,6 +2525,17 @@ export class CodexSecurity {
                 signal,
                 workbench: ownedWorkbench,
                 writer: artifactWriter!,
+                projectChild: (
+                  sourceScanId,
+                  sourceDirectory,
+                  projectionSignal,
+                ) =>
+                  artifactWriter!.projectChild(
+                    scanId,
+                    sourceScanId,
+                    sourceDirectory,
+                    projectionSignal,
+                  ),
                 createClient: () =>
                   new CodexSecurity(
                     childConfig,

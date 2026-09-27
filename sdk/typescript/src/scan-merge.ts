@@ -1,19 +1,13 @@
-import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
-import { join, posix, relative, resolve, sep } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
-import { readScanFile } from "./contract.js";
 import type { ScanArtifactRestorer } from "./runtime.js";
-import type { ScanResult } from "./result.js";
-import { relativePathIsOutside } from "./targets.js";
 import {
   exactUnion,
-  isObject,
   preserveFindingDetails,
   prepareScanFindings,
   scanFindingIdentity,
-  semanticScanDraft,
   validateFindingSemantics,
   type JsonObject,
   type SemanticScan,
@@ -38,218 +32,6 @@ export interface ScanMergeResult {
   newFindings: number;
   /** Each novel issue belongs to the earliest input that discovered it. */
   newFindingScanIds: string[];
-}
-
-/** The normal scan lifecycle has already validated and sealed these documents. */
-export function scanMergeInput(
-  result: Pick<ScanResult, "manifest" | "findings" | "coverage" | "scanDir">,
-  parentScanId: string,
-): ScanMergeInput {
-  const scanId = result.manifest.scan.id;
-  const includePaths = result.manifest.scan.scope.includePaths;
-  // POSIX containment is a normalized directory prefix comparison. Resolve
-  // scopes once, rather than computing a relative path for every pair.
-  // Windows keeps its native drive, UNC and case-insensitive comparisons.
-  const prefixes =
-    process.platform === "win32"
-      ? undefined
-      : includePaths.map((scope) => {
-          const path = resolve(scope);
-          return path.endsWith("/") ? path : `${path}/`;
-        });
-  const findings = result.findings.findings.filter((finding) =>
-    finding.locations.some((location) => {
-      if (prefixes === undefined)
-        return includePaths.some(
-          (scope) => !relativePathIsOutside(relative(scope, location.path)),
-        );
-      const path = `${resolve(location.path)}/`;
-      return prefixes.some((prefix) => path.startsWith(prefix));
-    }),
-  );
-  const draft = semanticScanDraft(
-    parentScanId,
-    result.manifest.scan,
-    findings,
-    result.coverage,
-  );
-  if (draft.complete === false)
-    throw new Error("A scan checkpoint cannot be merged as a completed scan.");
-  draft.findings.forEach((finding, index) => {
-    finding["provenance"] = {
-      ...finding.provenance,
-      sourceFindingIds: [`${scanId}:${index}`],
-    };
-  });
-  return {
-    scanId,
-    scanDir: result.scanDir,
-    draft,
-    sourceFindings: structuredClone(findings),
-  };
-}
-
-/** Copy ordinary finding reports and their local evidence using the normal artifact reader/writer. */
-export async function projectScanMergeWriteups(
-  input: ScanMergeInput,
-  writer: ScanArtifactRestorer,
-  signal?: AbortSignal,
-): Promise<ScanMergeInput> {
-  const projected = structuredClone(input);
-  const running = new Map<string, Promise<void>>();
-  let sequence = 0;
-  let failure: { sequence: number; error: unknown } | undefined;
-  const failed = (index: number, error: unknown) => {
-    if (failure === undefined || index < failure.sequence)
-      failure = { sequence: index, error };
-  };
-  const collisionKey = (path: string) => path.normalize("NFC").toUpperCase();
-  const ready = async (key: string): Promise<boolean> => {
-    // Preserve overwrite order for aliases and file/directory collisions.
-    for (const [other, operation] of running) {
-      if (
-        key === other ||
-        key.startsWith(`${other}/`) ||
-        other.startsWith(`${key}/`)
-      )
-        await operation;
-    }
-    // One producer admits both reports and evidence. A slot covers the read
-    // and the entire write, so no ninth payload can be retained while waiting.
-    if (running.size === 8) await Promise.race(running.values());
-    signal?.throwIfAborted();
-    return failure === undefined;
-  };
-  const track = (key: string, operation: Promise<void>) => {
-    const index = sequence++;
-    running.set(
-      key,
-      operation
-        .catch((error: unknown) => failed(index, error))
-        .finally(() => running.delete(key)),
-    );
-  };
-  const copy = async (source: string, destination: string): Promise<void> => {
-    await writer.restore(
-      destination,
-      await readScanFile(
-        input.scanDir,
-        source,
-        "Scan merge writeup evidence",
-        signal,
-      ),
-    );
-  };
-  const reportSlugs = new Map<string, string>();
-  const reservedSlugs = new Set(
-    projected.draft.findings.flatMap((finding) => {
-      const writeup = finding.writeup;
-      return typeof writeup?.reportPath === "string"
-        ? [
-            collisionKey(
-              `${input.scanId}-${posix.basename(posix.dirname(writeup.reportPath))}`,
-            ),
-          ]
-        : [];
-    }),
-  );
-  // Reuse only the current source of a destination, within this call. An
-  // intervening report alias must finish overwriting the entire prior tree.
-  const destinations = new Map<string, string>();
-  try {
-    reports: for (const finding of projected.draft.findings) {
-      const writeup = finding.writeup;
-      if (writeup === undefined) continue;
-      signal?.throwIfAborted();
-      if (failure !== undefined) break;
-      const reportPath = writeup.reportPath;
-      const sourceDirectory = posix.dirname(reportPath);
-      const baseSlug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
-      let slug = reportSlugs.get(reportPath) ?? baseSlug;
-      let directoryKey = collisionKey(`findings/${slug}`);
-      let destination = `findings/${slug}/${slug}.md`;
-      if (destinations.get(directoryKey) === reportPath) {
-        writeup.reportPath = destination;
-        continue;
-      }
-      if (!(await ready(collisionKey(destination)))) break;
-      // Read the checked report before enumerating its directory. Hold its
-      // payload slot while selecting a name that cannot overwrite evidence.
-      const bytes = await readScanFile(
-        input.scanDir,
-        reportPath,
-        "Scan merge writeup",
-        signal,
-      );
-      const reportEntries = await readdir(
-        join(input.scanDir, sourceDirectory),
-        {
-          withFileTypes: true,
-        },
-      );
-      if (!reportSlugs.has(reportPath)) {
-        const evidenceNames = new Set(
-          reportEntries
-            .filter((entry) => entry.name !== posix.basename(reportPath))
-            .map((entry) => collisionKey(entry.name)),
-        );
-        let suffix = 2;
-        while (
-          evidenceNames.has(collisionKey(`${slug}.md`)) ||
-          (slug !== baseSlug && reservedSlugs.has(collisionKey(slug)))
-        ) {
-          slug = `${baseSlug}-${suffix++}`;
-        }
-        reportSlugs.set(reportPath, slug);
-        reservedSlugs.add(collisionKey(slug));
-        directoryKey = collisionKey(`findings/${slug}`);
-        destination = `findings/${slug}/${slug}.md`;
-      }
-      if (destinations.has(directoryKey)) {
-        await Promise.all(
-          [...running]
-            .filter(([key]) => key.startsWith(`${directoryKey}/`))
-            .map(([, operation]) => operation),
-        );
-      }
-      const reportKey = collisionKey(destination);
-      if (!(await ready(reportKey))) break;
-      track(reportKey, writer.restore(destination, bytes));
-      const pending = [sourceDirectory];
-      while (pending.length > 0) {
-        signal?.throwIfAborted();
-        const directory = pending.pop()!;
-        const entries =
-          directory === sourceDirectory
-            ? reportEntries
-            : await readdir(join(input.scanDir, directory), {
-                withFileTypes: true,
-              });
-        for (const entry of entries) {
-          const path = posix.join(directory, entry.name);
-          if (path === reportPath) continue;
-          const evidenceDestination = `findings/${slug}/${posix.relative(sourceDirectory, path)}`;
-          const key = collisionKey(evidenceDestination);
-          if (entry.isDirectory()) {
-            pending.push(path);
-            continue;
-          }
-          if (!(await ready(key))) break reports;
-          track(key, copy(path, evidenceDestination));
-        }
-      }
-      destinations.set(directoryKey, reportPath);
-      writeup.reportPath = destination;
-    }
-  } catch (error) {
-    failed(sequence, error);
-  }
-  // Admission follows report and evidence source order. Drain every admitted
-  // write before reporting the first error, including traversal/cancellation.
-  await Promise.all(running.values());
-  if (failure !== undefined) throw failure.error;
-  if (destinations.size > 0) signal?.throwIfAborted();
-  return projected;
 }
 
 // Keep only the last compiled schema pair, independent of any scan's state.
@@ -555,7 +337,6 @@ function reconcileScanMerge(
 /** Preserve each independent scan's coverage; the merge model cannot resolve it. */
 export function combineScanCoverage(
   inputs: readonly ScanMergeInput[],
-  parentScanDir: string,
   unresolved: readonly string[] = [],
   priorCoverage?: SemanticCoverage,
 ): SemanticCoverage {
@@ -576,45 +357,21 @@ export function combineScanCoverage(
     explicitExclusions: [],
     deferred: [],
   };
-  const projectField = <
+  const combineField = <
     Field extends
       "surfaces" | "explicitExclusions" | "deferred" | "openQuestions",
   >(
     field: Field,
   ): void => {
-    coverage[field] = exactUnion([
-      ...structuredClone(priorCoverage?.[field] ?? []),
-      ...inputs.flatMap((input) => {
-        const root = relative(parentScanDir, input.scanDir)
-          .split(sep)
-          .join("/");
-        return (input.draft.coverage[field] ?? []).map((value) => {
-          if (!isObject(value)) return value;
-          const entry = structuredClone(value);
-          if (typeof entry["id"] === "string")
-            entry["id"] = `${input.scanId}/${entry["id"]}`;
-          if (typeof entry["candidateId"] === "string") {
-            entry["sourceCandidateId"] = entry["candidateId"];
-            entry["candidateId"] =
-              `${input.scanId}:${createHash("sha256").update(entry["candidateId"]).digest("hex")}`;
-          }
-          if (Array.isArray(entry["surfaceIds"]))
-            entry["surfaceIds"] = entry["surfaceIds"].map(
-              (id) => `${input.scanId}/${id}`,
-            );
-          if (Array.isArray(entry["receiptRefs"]))
-            entry["receiptRefs"] = entry["receiptRefs"].map(
-              (ref) => `${root}/${ref}`,
-            );
-          return entry;
-        });
-      }),
-    ]) as SemanticCoverage[Field];
+    const records: unknown[] = structuredClone(priorCoverage?.[field] ?? []);
+    for (const input of inputs)
+      records.push(...structuredClone(input.draft.coverage[field] ?? []));
+    coverage[field] = exactUnion(records) as SemanticCoverage[Field];
   };
-  projectField("surfaces");
-  projectField("explicitExclusions");
-  projectField("deferred");
-  projectField("openQuestions");
+  combineField("surfaces");
+  combineField("explicitExclusions");
+  combineField("deferred");
+  combineField("openQuestions");
   coverage.deferred.push(...unresolved.map((reason) => ({ reason })));
   return coverage;
 }

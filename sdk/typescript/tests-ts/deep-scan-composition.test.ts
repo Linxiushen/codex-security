@@ -29,6 +29,7 @@ import {
   type DeepScanCheckpoint,
   type DeepScanComposition,
 } from "../src/deep-scan.js";
+import { loadContract } from "../src/contract.js";
 import { ScanResult } from "../src/result.js";
 import { abortable } from "../src/targets.js";
 import {
@@ -37,6 +38,7 @@ import {
 } from "../src/scan-execution.js";
 import {
   scanFindingIdentity,
+  semanticScanDraft,
   type JsonObject,
   type SemanticScan,
 } from "../src/scan-semantics.js";
@@ -120,6 +122,7 @@ async function harness(
   const controller = new AbortController();
   const scanId = randomUUID();
   const records = new Map<string, SavedRecord>();
+  const projectedResults = new Map<string, ScanResult>();
   const calls: ScanOptions[] = [];
   const published: SemanticScan[] = [];
   const checkpoints: DeepScanCheckpoint[] = [];
@@ -167,6 +170,7 @@ async function harness(
         try {
           const completed = await run({ ...options, resumeScanId: id });
           records.get(id)!.progress.status = "complete";
+          projectedResults.set(completed.manifest.scan.id, completed);
           return completed;
         } finally {
           active -= 1;
@@ -176,6 +180,22 @@ async function harness(
         closed += 1;
       },
     }),
+    async projectChild(childId, childDir) {
+      const completed =
+        projectedResults.get(childId) ??
+        (await loadContract(childDir, { pluginRoot, expectedScanId: childId }));
+      const sourceFindings = structuredClone(completed.findings.findings);
+      const draft = semanticScanDraft(
+        scanId,
+        completed.manifest.scan,
+        sourceFindings,
+        completed.coverage,
+      );
+      for (const [index, finding] of draft.findings.entries()) {
+        finding.provenance.sourceFindingIds = [`${childId}:${index}`];
+      }
+      return { scanId: childId, scanDir: childDir, draft, sourceFindings };
+    },
     async workbench(args, contents) {
       if (args[0] === "save-scan-artifact") {
         const state = JSON.parse(contents!) as DeepScanCheckpoint;

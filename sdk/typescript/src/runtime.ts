@@ -59,6 +59,7 @@ import {
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
+import type { ScanMergeInput } from "./scan-merge.js";
 import {
   resolveTrustedExecutable,
   type InspectedExecutable,
@@ -1778,6 +1779,12 @@ export async function prepareScanArtifactRestorer(
   ScanArtifactRestorer & {
     prepareDirectory(relativePath: string): Promise<void>;
     remove(relativePath: string): Promise<void>;
+    projectChild(
+      parentScanId: string,
+      sourceScanId: string,
+      sourceDirectory: string,
+      signal?: AbortSignal,
+    ): Promise<ScanMergeInput>;
   }
 > {
   let helperPath: string;
@@ -1898,6 +1905,45 @@ export async function prepareScanArtifactRestorer(
     },
     prepareDirectory: (path) => update("prepareDirectory", path),
     remove: (path) => update("remove", path),
+    async projectChild(
+      parentScanId,
+      sourceScanId,
+      sourceDirectory,
+      signal = options.signal,
+    ) {
+      signal?.throwIfAborted();
+      const result = await runCodexCommand(
+        { command: options.python },
+        [
+          "-I",
+          "-X",
+          "utf8",
+          "-B",
+          join(dirname(helperPath), "project_scan_artifacts.py"),
+        ],
+        pluginHelperEnvironment(options.environment),
+        JSON.stringify({
+          parentScanId,
+          sourceScanId,
+          sourceDirectory,
+          parentDirectory: canonicalPath,
+          expectedParentIdentity: { dev, ino },
+        }),
+        signal,
+      ).catch((error: unknown) => {
+        signal?.throwIfAborted();
+        throw error;
+      });
+      signal?.throwIfAborted();
+      if (!result.success)
+        throw new OutputDirectoryError(
+          result.stderr.trim() ||
+            `Scan projection exited with status ${result.exitCode}.`,
+        );
+      // The SDK-owned helper validates the sealed child and writes its evidence
+      // before returning the semantic projection. Its response retains extensions.
+      return JSON.parse(result.stdout) as ScanMergeInput;
+    },
   };
 }
 

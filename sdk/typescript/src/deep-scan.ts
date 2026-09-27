@@ -2,7 +2,6 @@ import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
-import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import {
   ScanCostLimitExceededError,
@@ -13,8 +12,6 @@ import type { DeepScanOptions } from "./scan-settings.js";
 import {
   combineScanCoverage,
   createScanMergeValidator,
-  projectScanMergeWriteups,
-  scanMergeInput,
   scanMergePrompt,
   type ScanMergeInput,
 } from "./scan-merge.js";
@@ -87,6 +84,11 @@ export interface DeepScanComposition {
   onRetry?(message: string): void;
   onCleanupError?(error: unknown): void;
   writer: ScanArtifactRestorer;
+  projectChild(
+    sourceScanId: string,
+    sourceDirectory: string,
+    signal: AbortSignal,
+  ): Promise<ScanMergeInput>;
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
   historicalCost?(threadId: string): Promise<ScanCost | null>;
@@ -285,19 +287,9 @@ export async function runDeepScans(
         record.progress.status === "complete" &&
         !accepted.has(record.scanId)
       ) {
-        const contract = await loadContract(record.scanDir, {
-          pluginRoot: input.pluginRoot,
-          signal,
-        });
-        if (contract.manifest.scan.id !== record.scanId)
-          throw new Error("Saved scan artifacts changed identity.");
         accepted.set(
           record.scanId,
-          await projectScanMergeWriteups(
-            scanMergeInput({ ...contract, scanDir: record.scanDir }, scanId),
-            input.writer,
-            signal,
-          ),
+          await input.projectChild(record.scanId, record.scanDir, signal),
         );
         if (recoverOutcomes)
           recoveredSuccess =
@@ -419,12 +411,7 @@ export async function runDeepScans(
       state,
       merged,
       pending.map((result) => result.scanId),
-      combineScanCoverage(
-        [...accepted.values()],
-        scanDir,
-        [],
-        state.legacy?.coverage,
-      ),
+      combineScanCoverage([...accepted.values()], [], state.legacy?.coverage),
     );
     await save();
     await input.publish(state.aggregate!);
@@ -460,9 +447,9 @@ export async function runDeepScans(
           });
           accepted.set(
             result.manifest.scan.id,
-            await projectScanMergeWriteups(
-              scanMergeInput(result, scanId),
-              input.writer,
+            await input.projectChild(
+              result.manifest.scan.id,
+              result.scanDir,
               signal,
             ),
           );
@@ -590,7 +577,6 @@ export async function runDeepScans(
       ...state.aggregate!,
       coverage: combineScanCoverage(
         [...accepted.values()],
-        scanDir,
         unresolved,
         state.legacy?.coverage,
       ),
@@ -621,7 +607,6 @@ export async function runDeepScans(
           [...accepted.values()].filter((pass) =>
             state.mergedScanIds.includes(pass.scanId),
           ),
-          scanDir,
           state.passes
             .filter(
               (pass) =>

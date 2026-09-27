@@ -198,6 +198,23 @@ async function fixture(
       acquireScanExecution: async () => () => {},
       repositoryRevision: async () => null,
       prepareScanArtifactRestorer: async () => ({
+        async projectChild(parentScanId, sourceScanId, sourceDirectory) {
+          return {
+            scanId: sourceScanId,
+            scanDir: sourceDirectory,
+            sourceFindings: [],
+            draft: {
+              scanId: parentScanId,
+              findings: [],
+              coverage: {
+                completeness: "complete",
+                surfaces: [],
+                explicitExclusions: [],
+                deferred: [],
+              },
+            },
+          };
+        },
         async prepareDirectory(path) {
           await mkdir(join(scanDir, path), { recursive: true });
         },

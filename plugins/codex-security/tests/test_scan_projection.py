@@ -176,3 +176,38 @@ def test_completed_projection_requires_completed_seal(projection_fixture, termin
     assert completed.returncode != 0
     assert "Only a sealed completed scan" in completed.stderr
     assert not (parent_dir / "findings").exists()
+
+
+@pytest.mark.parametrize(
+    "location, scope, expected",
+    [
+        ("src/extract.py", "SRC", True),
+        ("src/extract.py", "Src/Extract.py", True),
+        ("src-other/extract.py", "SRC", False),
+        ("./SRC/extract.py", "src", True),
+    ],
+)
+def test_projection_keeps_windows_scope_case_semantics(
+    location, scope, expected, monkeypatch, tmp_path
+):
+    import ntpath
+
+    import project_scan_artifacts as projection
+
+    monkeypatch.setattr(projection, "normcase", ntpath.normcase)
+    parent = tmp_path / "parent"
+    source = parent / "child"
+    source.mkdir(parents=True)
+    finding = {"locations": [{"path": location}], "provenance": {"source": "local_plugin"}}
+    result = projection.project_scan_artifacts(
+        "parent",
+        "child",
+        source,
+        parent,
+        {"scan": {"scope": {"includePaths": [scope], "excludePaths": []}}},
+        {"findings": [finding]},
+        {"completeness": "complete", "surfaces": [], "deferred": [], "explicitExclusions": []},
+    )
+    assert result["sourceFindings"] == ([finding] if expected else [])
+    if expected:
+        assert result["draft"]["findings"][0]["provenance"]["sourceFindingIds"] == ["child:0"]

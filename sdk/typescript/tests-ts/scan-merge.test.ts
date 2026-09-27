@@ -2,23 +2,13 @@ import type {
   SemanticFinding,
   SemanticCoverage,
 } from "../src/semantic-models.js";
-import {
-  mkdtemp,
-  mkdir,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import {
   combineScanCoverage,
   createScanMergeValidator,
-  scanMergeInput,
-  projectScanMergeWriteups,
+  type ScanMergeInput,
   scanMergePrompt,
   scanMergeModelInputs,
   type ScanAggregate,
@@ -37,15 +27,6 @@ const pluginRoot = fileURLToPath(
   new URL("../../../plugins/codex-security/", import.meta.url),
 );
 let merge: Awaited<ReturnType<typeof createScanMergeValidator>>;
-const directories: string[] = [];
-afterEach(async () => {
-  await Promise.all(
-    directories
-      .splice(0)
-      .map((directory) => rm(directory, { recursive: true, force: true })),
-  );
-});
-
 beforeAll(async () => {
   merge = await createScanMergeValidator(pluginRoot);
 });
@@ -73,25 +54,26 @@ function child(
   scanId: string,
   findings: SemanticFinding[] = [finding()],
   coverage: JsonObject = {},
-  includePaths: readonly string[] = ["src"],
-) {
-  return scanMergeInput(
-    {
-      scanDir: join(root, "artifacts", "scans", scanId),
-      manifest: {
-        scan: {
-          id: scanId,
-          scope: { includePaths, excludePaths: [] },
+): ScanMergeInput {
+  const sourceFindings = findings.map((value, index) => ({
+    ...structuredClone(value),
+    findingId: `${scanId}-finding-${index}`,
+    occurrenceId: `${scanId}-occurrence-${index}`,
+    fingerprints: { stable: `${scanId}-${index}` },
+  }));
+  return {
+    scanId,
+    scanDir: join(root, "artifacts", "scans", scanId),
+    sourceFindings,
+    draft: {
+      scanId: parent,
+      findings: findings.map((value, index) => ({
+        ...structuredClone(value),
+        provenance: {
+          ...structuredClone(value.provenance),
+          sourceFindingIds: [`${scanId}:${index}`],
         },
-      },
-      findings: {
-        findings: findings.map((value, index) => ({
-          ...value,
-          findingId: `${scanId}-finding-${index}`,
-          occurrenceId: `${scanId}-occurrence-${index}`,
-          fingerprints: { stable: `${scanId}-${index}` },
-        })),
-      },
+      })),
       coverage: {
         completeness: "complete",
         surfaces: [],
@@ -99,9 +81,8 @@ function child(
         deferred: [],
         ...coverage,
       },
-    } as unknown as Parameters<typeof scanMergeInput>[0],
-    parent,
-  );
+    },
+  };
 }
 
 function submission(
@@ -125,63 +106,10 @@ function sources(
 }
 
 describe("local scan merging", () => {
-  test.each([
-    { includePaths: ["src"], expected: ["inside", "mixed"] },
-    { includePaths: ["src/render.js"], expected: ["inside", "mixed"] },
-    {
-      includePaths: ["."],
-      expected: ["outside", "prefix", "inside", "mixed"],
-    },
-    { includePaths: ["src", "docs"], expected: ["outside", "inside", "mixed"] },
-    { includePaths: ["other"], expected: [] },
-  ])(
-    "admits findings within $includePaths without changing their locations",
-    ({ includePaths, expected }) => {
-      const findings = [
-        { id: "outside", paths: ["docs/index.js"] },
-        { id: "prefix", paths: ["src-private/render.js"] },
-        { id: "inside", paths: ["src/render.js"] },
-        { id: "mixed", paths: ["docs/index.js", "./src/render.js"] },
-      ].map(({ id, paths }) =>
-        finding(id, {
-          locations: paths.map((path) => ({ path, startLine: 1 })),
-        }),
-      );
-      const original = structuredClone(findings);
-      const input = child("scoped", findings, {}, includePaths);
-      expect(input.draft.findings.map((value) => value["identity"])).toEqual(
-        expected.map((anchor) => ({ anchor })),
-      );
-      const retained = original.filter((value) =>
-        expected.some(
-          (anchor) => anchor === (value["identity"] as JsonObject)["anchor"],
-        ),
-      );
-      expect(input.draft.findings).toMatchObject(retained);
-      expect(input.sourceFindings).toMatchObject(retained);
-      const merged = merge(submission(input.draft.findings), [input], null);
-      expect(merged.newFindings).toBe(expected.length);
-      expect(
-        merged.aggregate.findings
-          .flatMap(sources)
-          .map(({ finding }) => finding),
-      ).toEqual(input.sourceFindings);
-      expect(findings).toEqual(original);
-    },
-  );
-
-  test("rebinds semantic input while retaining exact sealed findings", () => {
+  test("restores exact source findings over model-authored replacements", () => {
     const input = child("first", [
       finding("shared", { extensions: { custom: { evidence: ["exact"] } } }),
     ]);
-    expect(input.scanId).toBe("first");
-    expect(input.draft.scanId).toBe(parent);
-    expect(input.draft.scope).toBeUndefined();
-    expect(input.draft.findings[0]).not.toHaveProperty("findingId");
-    expect(input.sourceFindings[0]).toHaveProperty(
-      "findingId",
-      "first-finding-0",
-    );
     const submitted = structuredClone(input.draft.findings);
     provenance(submitted[0]!)["sourceFindings"] = [
       { id: "first:0", finding: { summary: "Model-authored replacement." } },
@@ -364,7 +292,7 @@ describe("local scan merging", () => {
       },
       {
         ...result.aggregate,
-        coverage: combineScanCoverage([first, next], root),
+        coverage: combineScanCoverage([first, next]),
       },
     );
     expect(
@@ -380,59 +308,6 @@ describe("local scan merging", () => {
     );
     expect(reordered.newFindings).toBe(1);
     expect(reordered.newFindingScanIds).toEqual([next.scanId]);
-  });
-
-  test("projects writeups and PoC bytes without changing source evidence or repository paths", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "scan-merge-writeups-"));
-    directories.push(directory);
-    const input = child("first", [
-      finding("shared", { writeup: { reportPath: "findings/issue/issue.md" } }),
-    ]);
-    input.scanDir = directory;
-    await mkdir(join(directory, "findings/issue/poc"), { recursive: true });
-    await writeFile(
-      join(directory, "findings/issue/issue.md"),
-      "# Proof\nSee [payload](poc/payload.bin).\n",
-    );
-    await writeFile(
-      join(directory, "findings/issue/poc/payload.bin"),
-      new Uint8Array([0, 1, 254, 255]),
-    );
-    const original = structuredClone(input);
-    const copied = new Map<string, Uint8Array>();
-    const projected = await projectScanMergeWriteups(input, {
-      async restore(path, contents) {
-        copied.set(path, contents);
-      },
-    });
-    expect(copied.get("findings/first-issue/first-issue.md")).toEqual(
-      await readFile(join(directory, "findings/issue/issue.md")),
-    );
-    expect(copied.get("findings/first-issue/poc/payload.bin")).toEqual(
-      new Uint8Array([0, 1, 254, 255]),
-    );
-    expect(projected.draft.findings[0]).toHaveProperty(
-      "writeup.reportPath",
-      "findings/first-issue/first-issue.md",
-    );
-    expect(projected.draft.findings[0]!["locations"]).toEqual(
-      input.draft.findings[0]!["locations"],
-    );
-    expect(projected.sourceFindings).toEqual(original.sourceFindings);
-    expect(input).toEqual(original);
-    const result = merge(
-      submission(projected.draft.findings),
-      [projected],
-      null,
-    );
-    expect(sources(result.aggregate.findings[0]!)[0]!.finding).toHaveProperty(
-      "writeup.reportPath",
-      "findings/issue/issue.md",
-    );
-    expect(result.aggregate.findings[0]).toHaveProperty(
-      "writeup.reportPath",
-      "findings/first-issue/first-issue.md",
-    );
   });
 
   test("credits a new issue to its earliest source pass regardless of output or reference order", () => {
@@ -468,84 +343,6 @@ describe("local scan merging", () => {
     expect(repeated.newFindingScanIds).toEqual([]);
   });
 
-  test("keeps reports and evidence separate when renamed report paths collide", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "scan-merge-collision-"));
-    directories.push(directory);
-    const input = child("first", [
-      finding("issue", { writeup: { reportPath: "findings/issue/issue.md" } }),
-      finding("issue-3", {
-        writeup: { reportPath: "findings/issue-3/issue-3.md" },
-      }),
-    ]);
-    input.scanDir = directory;
-    const files = {
-      "findings/issue/issue.md":
-        "# Original report\n[payload](first-issue.md)\n",
-      "findings/issue/first-issue.md":
-        "Evidence named like the projected report.",
-      "findings/issue/first-issue-2.md/payload.bin": "Nested evidence.",
-      "findings/issue-3/issue-3.md": "# Another report\n",
-    };
-    for (const [path, text] of Object.entries(files)) {
-      await mkdir(join(directory, path, ".."), { recursive: true });
-      await writeFile(join(directory, path), text);
-    }
-    const output = join(directory, "projected");
-    const project = () =>
-      projectScanMergeWriteups(input, {
-        async restore(path, bytes) {
-          await mkdir(join(output, path, ".."), { recursive: true });
-          await writeFile(join(output, path), bytes);
-        },
-      });
-    const first = await project();
-    const repeated = await project();
-    expect(repeated).toEqual(first);
-    expect(first.draft.findings.map((entry) => entry["writeup"])).toEqual([
-      { reportPath: "findings/first-issue-4/first-issue-4.md" },
-      { reportPath: "findings/first-issue-3/first-issue-3.md" },
-    ]);
-    const expected = {
-      "findings/first-issue-4/first-issue-4.md":
-        files["findings/issue/issue.md"],
-      "findings/first-issue-4/first-issue.md":
-        files["findings/issue/first-issue.md"],
-      "findings/first-issue-4/first-issue-2.md/payload.bin":
-        files["findings/issue/first-issue-2.md/payload.bin"],
-      "findings/first-issue-3/first-issue-3.md":
-        files["findings/issue-3/issue-3.md"],
-    };
-    for (const [path, contents] of Object.entries(expected))
-      expect(await readFile(join(output, path), "utf8")).toBe(contents);
-  });
-
-  test("rejects writeup evidence that links outside the completed scan", async () => {
-    const directory = await mkdtemp(
-      join(tmpdir(), "scan-merge-linked-writeup-"),
-    );
-    directories.push(directory);
-    const input = child("first", [
-      finding("shared", { writeup: { reportPath: "findings/issue/issue.md" } }),
-    ]);
-    input.scanDir = directory;
-    await mkdir(join(directory, "findings/issue"), { recursive: true });
-    await writeFile(join(directory, "findings/issue/issue.md"), "# Proof\n");
-    await writeFile(join(directory, "external.txt"), "unrelated local data");
-    await symlink(
-      join(directory, "external.txt"),
-      join(directory, "findings/issue/linked.txt"),
-    );
-    const paths: string[] = [];
-    await expect(
-      projectScanMergeWriteups(input, {
-        async restore(path) {
-          paths.push(path);
-        },
-      }),
-    ).rejects.toThrow("regular non-symlink file");
-    expect(paths).toEqual(["findings/first-issue/first-issue.md"]);
-  });
-
   test("requires reconciliation of differing source contexts even without findings", () => {
     const first = child("first", []);
     const second = child("second", []);
@@ -564,65 +361,72 @@ describe("local scan merging", () => {
     });
   });
 
-  test("combines independent coverage IDs and receipt paths without mutating inputs", () => {
-    const coverage: SemanticCoverage = {
-      explicitExclusions: [],
+  test("unions already projected coverage without mutating inputs or namespacing twice", () => {
+    const first = child("first", [], {
       completeness: "partial",
       surfaces: [
         {
-          id: "api",
+          id: "first/api",
           label: "API",
           disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.json"],
+          receiptRefs: ["artifacts/scans/first/artifacts/review.json"],
         },
       ],
       deferred: [
         {
-          id: "pending",
-          candidateId: "same-candidate",
+          candidateId: "first-candidate",
           reason: "Check ownership.",
-          surfaceIds: ["api"],
+          surfaceIds: ["first/api"],
         },
       ],
       openQuestions: ["Can an untrusted caller reach the route?"],
-    };
-    const first = child("first", [], coverage);
-    const second = child("second", [], coverage);
-    const original = structuredClone(first.draft.coverage);
-    const combined = combineScanCoverage([first, second], root, [
-      "One interrupted scan retains unfinished work.",
+    });
+    const second = child("second", [], {
+      surfaces: [
+        {
+          id: "second/api",
+          label: "API",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/scans/second/artifacts/review.json"],
+        },
+      ],
+      deferred: [
+        {
+          candidateId: "second-candidate",
+          reason: "Check ownership.",
+          surfaceIds: ["second/api"],
+        },
+      ],
+      openQuestions: first.draft.coverage.openQuestions,
+    });
+    const before = structuredClone([first, second]);
+    const combined = combineScanCoverage(
+      [first, second],
+      ["One interrupted scan retains unfinished work."],
+    );
+    expect(combined.completeness).toBe("partial");
+    expect(combined.surfaces).toEqual([
+      ...first.draft.coverage.surfaces,
+      ...second.draft.coverage.surfaces,
     ]);
-    expect(combined["completeness"]).toBe("partial");
-    expect(combined["surfaces"]).toEqual([
-      {
-        ...coverage.surfaces[0]!,
-        id: "first/api",
-        receiptRefs: ["artifacts/scans/first/artifacts/review.json"],
-      },
-      {
-        ...coverage.surfaces[0]!,
-        id: "second/api",
-        receiptRefs: ["artifacts/scans/second/artifacts/review.json"],
-      },
+    expect(combined.deferred).toEqual([
+      ...first.draft.coverage.deferred,
+      ...second.draft.coverage.deferred,
+      { reason: "One interrupted scan retains unfinished work." },
     ]);
-    const deferred = combined["deferred"] as JsonObject[];
-    expect(deferred).toHaveLength(3);
-    expect(deferred[0]!["candidateId"]).not.toBe(deferred[1]!["candidateId"]);
-    expect(deferred[0]!["surfaceIds"]).toEqual(["first/api"]);
-    expect(first.draft.coverage).toEqual(original);
-    expect(combined["openQuestions"]).toHaveLength(1);
+    expect(combined.openQuestions).toHaveLength(1);
+    combined.surfaces[0]!.id = "changed";
+    expect([first, second]).toEqual(before);
     expect(
-      combineScanCoverage(
-        [child("unknown", [], { completeness: "unknown" })],
-        root,
-      )["completeness"],
+      combineScanCoverage([child("unknown", [], { completeness: "unknown" })])
+        .completeness,
     ).toBe("unknown");
-    expect(
-      combineScanCoverage([child("empty", [])], root)["completeness"],
-    ).toBe("complete");
-    expect(
-      combineScanCoverage([], root, ["No scan completed."])["completeness"],
-    ).toBe("partial");
+    expect(combineScanCoverage([child("empty", [])]).completeness).toBe(
+      "complete",
+    );
+    expect(combineScanCoverage([], ["No scan completed."]).completeness).toBe(
+      "partial",
+    );
   });
 
   test("retains saved parent coverage without rebasing its identities or receipts", () => {
@@ -654,17 +458,17 @@ describe("local scan merging", () => {
       completeness: "complete",
       surfaces: [
         {
-          id: "new-surface",
+          id: "fresh/new-surface",
           label: "Fresh surface",
           disposition: "no_issue_found",
-          receiptRefs: ["artifacts/fresh.json"],
+          receiptRefs: ["artifacts/scans/fresh/artifacts/fresh.json"],
         },
       ],
       explicitExclusions: [
         { pattern: "vendor/**", reason: "Generated dependencies." },
       ],
     });
-    const coverage = combineScanCoverage([fresh], root, [], prior);
+    const coverage = combineScanCoverage([fresh], [], prior);
     expect(coverage["completeness"]).toBe("partial");
     expect(coverage["surfaces"]).toEqual([
       prior.surfaces[0]!,
@@ -681,7 +485,7 @@ describe("local scan merging", () => {
     (coverage["surfaces"] as JsonObject[])[0]!["id"] = "changed";
     expect(prior).toEqual(original);
     expect(
-      combineScanCoverage([], root, [], {
+      combineScanCoverage([], [], {
         completeness: "complete",
         surfaces: [],
         explicitExclusions: [],
@@ -689,7 +493,7 @@ describe("local scan merging", () => {
       })["completeness"],
     ).toBe("complete");
     expect(
-      combineScanCoverage([fresh], root, [], {
+      combineScanCoverage([fresh], [], {
         completeness: "unknown",
         surfaces: [],
         explicitExclusions: [],
@@ -723,7 +527,7 @@ describe("local scan merging", () => {
           },
         },
       },
-      { ...aggregate, coverage: combineScanCoverage([input], root) },
+      { ...aggregate, coverage: combineScanCoverage([input]) },
     );
     expect(prepared.manifest).toHaveProperty(
       "scan.target.revision",

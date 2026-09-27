@@ -18,7 +18,7 @@ import {
   prepareScanArtifactRestorer,
   runWorkbench,
 } from "../../src/runtime.js";
-import { scanMergeInput } from "../../src/scan-merge.js";
+import type { ScanMergeInput } from "../../src/scan-merge.js";
 import {
   prepareSemanticScanDraft,
   type JsonObject,
@@ -143,6 +143,7 @@ try {
       });
       const before = await readFile(join(childDir, "findings.json"));
       let lastChild = 0;
+      let projectedChild: ScanMergeInput | undefined;
       const publish = async (draft: SemanticScan) => {
         const documents = prepareSemanticScanDraft(
           {
@@ -190,6 +191,15 @@ try {
         scanOptions: {},
         signal: new AbortController().signal,
         writer,
+        async projectChild(sourceScanId, sourceDirectory, signal) {
+          projectedChild = await checkedWriter.projectChild(
+            scanId,
+            sourceScanId,
+            sourceDirectory,
+            signal,
+          );
+          return projectedChild;
+        },
         workbench: (args, input) =>
           args.includes("--scan-id")
             ? owned(args, input)
@@ -202,10 +212,10 @@ try {
           },
           async close() {},
         }),
-        merge: async () => ({
-          scanId,
-          findings: scanMergeInput(completed, scanId).draft.findings,
-        }),
+        merge: async () => {
+          assert(projectedChild);
+          return { scanId, findings: projectedChild.draft.findings };
+        },
         publish,
         onCost() {},
         onRetry(message) {

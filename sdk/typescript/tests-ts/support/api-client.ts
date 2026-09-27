@@ -70,6 +70,9 @@ export class TestClient extends CodexSecurity {
         environment: {},
         acquireScanExecution: async () => () => {},
         prepareScanArtifactRestorer: async () => ({
+          async projectChild() {
+            throw new Error("Unexpected projection in test");
+          },
           restore: async () => {},
           prepareDirectory: async () => {},
           remove: async () => {},

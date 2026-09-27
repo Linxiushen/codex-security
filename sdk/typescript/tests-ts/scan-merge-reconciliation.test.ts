@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, expect, test } from "bun:test";
 import {
   createScanMergeValidator,
-  scanMergeInput,
+  type ScanMergeInput,
   type ScanAggregate,
 } from "../src/scan-merge.js";
 import {
@@ -116,31 +116,31 @@ function finding(anchor = "record"): SemanticFinding {
   };
 }
 
-function input(scanId: string, findings = [finding()]) {
-  return scanMergeInput(
-    {
-      scanDir: join(scratch, scanId),
-      manifest: {
-        scan: {
-          id: scanId,
-          scope: { includePaths: ["src"], excludePaths: [] },
+function input(scanId: string, findings = [finding()]): ScanMergeInput {
+  return {
+    scanId,
+    scanDir: join(scratch, scanId),
+    draft: {
+      scanId: parent,
+      findings: findings.map((entry, index) => ({
+        ...structuredClone(entry),
+        provenance: {
+          ...structuredClone(entry.provenance),
+          sourceFindingIds: [`${scanId}:${index}`],
         },
-      },
-      findings: {
-        findings: findings.map((entry, index) => ({
-          ...entry,
-          findingId: `${scanId}/${index}`,
-        })),
-      },
+      })),
       coverage: {
         completeness: "complete",
         surfaces: [],
         explicitExclusions: [],
         deferred: [],
       },
-    } as unknown as Parameters<typeof scanMergeInput>[0],
-    parent,
-  );
+    },
+    sourceFindings: findings.map((entry, index) => ({
+      ...structuredClone(entry),
+      findingId: `${scanId}/${index}`,
+    })),
+  };
 }
 
 function provenance(entry: JsonObject): JsonObject {
