@@ -532,10 +532,10 @@ def test_recovery_compares_open_questions_using_canonical_normalization(
     assert result.read_bytes() == original
 
 
-@pytest.mark.parametrize("projected", [False, True])
+@pytest.mark.parametrize("parent_projection", ["raw", "projected", "missing"])
 @pytest.mark.parametrize("retry_publication", [False, True])
 def test_rejected_retry_preserves_original_finding_history(
-    workbench_api, workbench_db, publication_scan, monkeypatch, projected, retry_publication
+    workbench_api, workbench_db, publication_scan, monkeypatch, parent_projection, retry_publication
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
@@ -597,7 +597,7 @@ def test_rejected_retry_preserves_original_finding_history(
         json.dumps(
             {
                 **scan.coverage,
-                "surfaces": projected_surfaces if projected else [surface],
+                "surfaces": projected_surfaces if parent_projection == "projected" else [surface],
                 "reviews": [
                     {"workerId": owner, "attempt": attempt, "completeness": "complete"}
                     for owner, attempt in (
@@ -606,11 +606,14 @@ def test_rejected_retry_preserves_original_finding_history(
                         (other_result.parent.name, 1),
                     )
                 ]
-                if projected
+                if parent_projection == "projected"
                 else [],
             }
         )
     )
+    if parent_projection == "missing":
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
     originals = {path: path.read_bytes() for path in (previous, result, other_result)}
     with monkeypatch.context() as interrupted:
         if retry_publication:
@@ -634,8 +637,14 @@ def test_rejected_retry_preserves_original_finding_history(
     assert recovered["resultsRecoveryNeeded"] is False
     assert recovered["findingCount"] == 0
     coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
-    assert coverage["surfaces"][0]["previousFindings"] == [finding]
-    assert all("previousFindings" not in item for item in coverage["surfaces"][1:])
+    for item in coverage["surfaces"]:
+        provenance = item.get("provenance")
+        if provenance is None or (
+            provenance["workerId"] == worker_id and provenance["attempt"] == 2
+        ):
+            assert item["previousFindings"] == [finding]
+        else:
+            assert "previousFindings" not in item
     assert all(path.read_bytes() == original for path, original in originals.items())
     published = (scan.scan_dir / "coverage.json").read_bytes()
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))

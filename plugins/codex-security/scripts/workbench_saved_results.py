@@ -1147,6 +1147,7 @@ def merge_saved_results(
         if superseded:
             continue
         if project_coverage:
+            reviewed_attempts.add((worker_id, worker["attempt"]))
             reviews = coverage.setdefault("reviews", [])
             if isinstance(reviews, list) and not any(
                 isinstance(review, dict)
