@@ -6,13 +6,14 @@ import { test } from "node:test";
 import { publishCoverageFixture } from "./deep_scan_coverage_fixture.mjs";
 
 for (const resume of [false, true]) {
-  for (const stopAfterDraft of [false, true]) {
-    test(`coverage provenance survives ${resume ? "reconstructed" : "live"} reduction and ${stopAfterDraft ? "recovery" : "completion"}`, async () => {
+  for (const outcome of ["completion", "recovery", "no parent"]) {
+    test(`coverage provenance survives ${resume ? "reconstructed" : "live"} reduction and ${outcome}`, async () => {
       const root = await mkdtemp(path.join(tmpdir(), "coverage-provenance-"));
       try {
         const { scanDir } = await publishCoverageFixture(root, "partial", {
           resume,
-          stopAfterDraft,
+          stopAfterDraft: outcome === "recovery",
+          stopBeforeDraft: outcome === "no parent",
         });
         const coverage = JSON.parse(
           await readFile(path.join(scanDir, "coverage.json"), "utf8"),

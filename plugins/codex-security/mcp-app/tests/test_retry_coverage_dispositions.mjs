@@ -7,7 +7,7 @@ import { publishCoverageFixture } from "./deep_scan_coverage_fixture.mjs";
 
 for (const surfaceOnly of [false, true]) {
   for (const resume of [false, true]) {
-    for (const disposition of ["rejected", "not_applicable"]) {
+    for (const disposition of ["rejected", "not_applicable", "reported"]) {
       for (const resolveOnRetry of [false, true]) {
         test(`${resume ? "resumed" : "live"} ${surfaceOnly ? "surface-only" : "deferred"} stopped recovery preserves ${resolveOnRetry ? "the later disposition" : "newer gaps"} after a ${disposition} retry`, async () => {
           const root = await mkdtemp(path.join(tmpdir(), "retry-disposition-"));
@@ -57,19 +57,56 @@ for (const surfaceOnly of [false, true]) {
                 id: "follow-up-second",
               });
             }
+            const findings =
+              disposition === "reported"
+                ? [
+                    {
+                      ruleId: "synthetic.retained-boundary",
+                      title: "Synthetic boundary finding",
+                      summary: "A finding retained from an earlier review.",
+                      severity: {
+                        level: "high",
+                        score: 8.1,
+                        scoringSystem: "CVSS:3.1",
+                      },
+                      confidence: {
+                        level: "high",
+                        rationale: "Synthetic evidence.",
+                      },
+                      taxonomy: { category: "path-traversal", cwe: ["CWE-22"] },
+                      locations: [
+                        { path: "source.py", startLine: 1, endLine: 1 },
+                      ],
+                      remediation: "Review the synthetic boundary.",
+                      provenance: {
+                        source: "local_plugin",
+                        candidateId: "candidate-1",
+                      },
+                    },
+                  ]
+                : undefined;
             const { scanDir } = await publishCoverageFixture(root, "partial", {
               stopBeforeDraft: true,
               resume,
               retryCoverage: resolveOnRetry
                 ? [pending, resolved]
                 : [resolved, pending],
+              retryFindings:
+                findings && (resolveOnRetry ? [[], findings] : [findings, []]),
             });
             const coverage = JSON.parse(
               await readFile(path.join(scanDir, "coverage.json"), "utf8"),
             );
             const retryGaps = coverage.deferred.filter((item) =>
-              item.id.startsWith("retry-gap-"),
+              pending.deferred.some((gap) => gap.reason === item.reason),
             );
+            if (findings) {
+              const retained = JSON.parse(
+                await readFile(path.join(scanDir, "findings.json"), "utf8"),
+              );
+              assert.equal(retained.findings.length, 1);
+              assert.equal(retained.findings[0].ruleId, findings[0].ruleId);
+            }
             assert.deepEqual(
               retryGaps.map((item) => item.reason),
               resolveOnRetry ? [] : pending.deferred.map((item) => item.reason),
@@ -84,7 +121,7 @@ for (const surfaceOnly of [false, true]) {
               coverage.surfaces.filter(
                 (item) => item.disposition === disposition,
               ).length,
-              1,
+              disposition === "reported" && !resolveOnRetry ? 0 : 1,
             );
             assert.ok(
               coverage.deferred.some(

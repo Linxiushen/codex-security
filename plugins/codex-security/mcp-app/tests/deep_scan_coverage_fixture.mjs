@@ -38,6 +38,7 @@ export async function publishCoverageFixture(
     receiptRetry = false,
     retryPending = false,
     retryCoverage,
+    retryFindings,
     questionRows,
     interruptPublication = false,
   } = {},
@@ -125,7 +126,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         {
           scanId: run.scanId,
           complete: false,
-          findings: [],
+          findings: retryFindings?.[0] ?? [],
           coverage: retryCoverage[0],
         },
       );
@@ -189,6 +190,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const pending = completeness === "partial" && status !== "complete";
     const coverage = {
       completeness: status,
+      reviews: [
+        { workerId: "untrusted-worker", attempt: 99, completeness: "complete" },
+      ],
       surfaces: [
         {
           id: "shared-surface",
@@ -254,7 +258,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     const bytes = JSON.stringify({
       scanId: run.scanId,
       complete: true,
-      findings: [],
+      findings: index === 0 ? (retryFindings?.[1] ?? []) : [],
       coverage,
     });
     if (receiptRetry) {
@@ -373,7 +377,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     // Legacy accepted reducers omitted coverage entirely.
     await writeFile(
       resultManifestPath,
-      JSON.stringify({ scanId: run.scanId, findings: [] }),
+      JSON.stringify({
+        scanId: run.scanId,
+        findings: retryFindings?.flat() ?? [],
+      }),
     );
     rawSources.set(
       resultManifestPath,
@@ -382,7 +389,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     await store.commitDedup({
       id,
       scanId: run.scanId,
-      newFindings: 0,
+      newFindings: retryFindings ? 1 : 0,
       resultManifestPath,
     });
     run = await store.get(run.scanId, threadId);
@@ -423,7 +430,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             repoRoot: targetPath,
             scanId: run.scanId,
           },
-          { scanId: run.scanId, findings: [] },
+          { scanId: run.scanId, findings: retryFindings?.flat() ?? [] },
         );
       }
       return { threadId: thread, finalResponse: "Audit finished." };
@@ -453,11 +460,13 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     stopBeforeDraft ? "failed" : "succeeded",
     terminal?.error,
   );
-  assert.equal(
-    terminal.noNewStreak,
-    statuses.length,
-    "source coverage must not change stopping policy",
-  );
+  if (!retryFindings) {
+    assert.equal(
+      terminal.noNewStreak,
+      statuses.length,
+      "source coverage must not change stopping policy",
+    );
+  }
   assert.equal(
     discoveryCalls,
     resume ? (continueAfterResume ? 1 : 0) : statuses.length + 1,
@@ -499,6 +508,10 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       run.scanId,
     ]);
     assert.equal(recovered.scan.resultsRecoveryNeeded, false);
+    const coveragePath = path.join(run.scanDir, "coverage.json");
+    const published = await readFile(coveragePath, "utf8");
+    await runWorkbench(["recover-scan-results", "--scan-id", run.scanId]);
+    assert.equal(await readFile(coveragePath, "utf8"), published);
   } else if (stopAfterDraft) {
     const stopped = await runWorkbench([
       "fail-scan",

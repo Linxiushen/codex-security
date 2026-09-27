@@ -898,6 +898,7 @@ def merge_saved_results(
                 isinstance(finding, dict)
                 and valid_finding(finding)
                 and (candidate_id := finding_candidate_id(finding))
+                and (owner, candidate_id) not in pending_candidates
             ):
                 resolved.setdefault((owner, candidate_id), "reported")
         for field in ("surfaces", "explicitExclusions"):
@@ -1135,15 +1136,35 @@ def merge_saved_results(
             finding_positions[key] = len(findings)
             findings.append(finding)
         worker = workers_by_id.get(worker_id)
-        reviewed = (
+        # Only the accepted current output belongs to this worker attempt. An
+        # unsuperseded archive can remain evidence after that output is lost.
+        project_coverage = (
             worker is not None
             and worker["status"] == "succeeded"
             and worker["merge_state"] == "merged"
-            and (worker_id, worker["attempt"]) in reviewed_attempts
+            and worker["result_manifest_path"] == str(scan_dir / relative)
+            and draft.get("complete") is not False
         )
         if superseded:
             continue
+        if project_coverage:
+            reviews = coverage.setdefault("reviews", [])
+            if isinstance(reviews, list) and not any(
+                isinstance(review, dict)
+                and review.get("workerId") == worker_id
+                and review.get("attempt") == worker["attempt"]
+                for review in reviews
+            ):
+                reviews.append(
+                    {
+                        "workerId": worker_id,
+                        "attempt": worker["attempt"],
+                        "completeness": draft["coverage"]["completeness"],
+                    }
+                )
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
+            if project_coverage and field == "reviews":
+                continue
             items = draft["coverage"].get(field, [])
             if not isinstance(items, list) or (field == "reviews" and not items):
                 continue
@@ -1180,12 +1201,16 @@ def merge_saved_results(
                     and (field == "deferred" or item.get("disposition") == "needs_follow_up")
                 ):
                     continue
-                if reviewed and isinstance(item, dict) and field != "reviews":
+                if project_coverage and isinstance(item, dict):
                     item = project_missing_record(field, item, index, worker, draft["coverage"])
                 if field == "surfaces" and worker is not None and isinstance(item, dict):
                     item = copy.deepcopy(item)
                     item["receiptRefs"] = coverage_receipts(item, worker, relative)
-                if reviewed and isinstance(item, dict) and coverage_record_retained(field, item):
+                if (
+                    project_coverage
+                    and isinstance(item, dict)
+                    and coverage_record_retained(field, item)
+                ):
                     continue
                 if isinstance(item, dict) and "id" not in item:
                     semantic_item = dict(item)

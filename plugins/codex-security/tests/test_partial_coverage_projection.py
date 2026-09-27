@@ -11,7 +11,7 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
-@pytest.mark.parametrize("parent_surfaces", ["missing", "projected", "renamed"])
+@pytest.mark.parametrize("parent_surfaces", ["missing", "projected", "renamed", "no-parent"])
 def test_missing_deferred_projection_links_first_duplicate_surface(
     workbench_api, workbench_db, publication_scan, parent_surfaces
 ):
@@ -71,6 +71,9 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
             }
         )
     )
+    if parent_surfaces == "no-parent":
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
     workbench_api["fail_scan"](
         workbench_db,
         Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
@@ -90,6 +93,91 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
     published = coverage_path.read_bytes()
     workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
     assert coverage_path.read_bytes() == published
+    late = write_checkpoint(
+        result.parent / "checkpoints",
+        {
+            **json.loads(result.read_text()),
+            "complete": False,
+            "coverage": {**scan.coverage, "openQuestions": ["Late worker checkpoint."]},
+        },
+    )
+    original_late = late.read_bytes()
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert coverage_path.read_bytes() == published
+    assert result.read_bytes() == original
+    assert late.read_bytes() == original_late
+
+
+@pytest.mark.parametrize("parent_review", [False, True])
+def test_missing_accepted_result_does_not_project_an_archived_attempt(
+    workbench_api, workbench_db, publication_scan, parent_review
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    result = scan.scan_dir / "artifacts" / worker_id / "output" / "result.json"
+    result.parent.mkdir(parents=True)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET attempt = 2, artifact_dir = ?, result_manifest_path = ? WHERE id = ?",
+            (str(result.parent), str(result), worker_id),
+        )
+    archive = result.parent.parent / "attempts" / "attempt-01"
+    receipt = archive / "artifacts" / "prior.txt"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("Prior attempt receipt.\n")
+    checkpoint = write_checkpoint(
+        archive / "checkpoints",
+        {
+            "scanId": scan.scan_id,
+            "complete": False,
+            "findings": [],
+            "coverage": {
+                **scan.coverage,
+                "completeness": "partial",
+                "surfaces": [
+                    {
+                        "id": "prior-surface",
+                        "label": "Prior unfinished review",
+                        "disposition": "needs_follow_up",
+                        "receiptRefs": ["artifacts/prior.txt"],
+                    }
+                ],
+                "deferred": [{"reason": "Prior proof gap.", "surfaceIds": ["prior-surface"]}],
+            },
+        },
+    )
+    original = checkpoint.read_bytes()
+    if parent_review:
+        (scan.scan_dir / "coverage.json").write_text(
+            json.dumps(
+                {
+                    **scan.coverage,
+                    "reviews": [{"workerId": worker_id, "attempt": 2, "completeness": "complete"}],
+                }
+            )
+        )
+    else:
+        for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+            (scan.scan_dir / name).unlink()
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    coverage = json.loads((scan.scan_dir / "coverage.json").read_text())
+    surface = next(
+        item for item in coverage["surfaces"] if item["label"] == "Prior unfinished review"
+    )
+    assert surface["id"] == "prior-surface"
+    assert "provenance" not in surface
+    assert surface["receiptRefs"] == [receipt.relative_to(scan.scan_dir).as_posix()]
+    assert len(coverage.get("reviews", [])) == int(parent_review)
+    pending = next(
+        item for item in coverage["deferred"] if item.get("reason") == "Prior proof gap."
+    )
+    assert pending["surfaceIds"] == [surface["id"]]
+    assert checkpoint.read_bytes() == original
 
 
 @pytest.mark.parametrize("worker_count", [1, 2])
@@ -598,7 +686,7 @@ def test_stopped_recovery_keeps_current_parent_projection(
             {"question": "This question was answered by the final parent draft."}
         )
     assert coverage["openQuestions"] == expected_questions
-    assert coverage.get("reviews", []) == ([] if recovery == "fallback-late" else reviews)
+    assert coverage.get("reviews", []) == reviews
     assert [item["id"] for item in coverage["surfaces"]] == (
         ["old-disposition"] if recovery == "incomplete" else []
     )
