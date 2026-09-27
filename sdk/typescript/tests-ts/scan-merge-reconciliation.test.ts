@@ -193,7 +193,7 @@ test("returned aggregates detach inherited history, candidates, originals and co
   expect({ source, previous, raw }).toEqual(before);
 });
 
-test("indexed attribution keeps aggregate matching order and validates again after preservation", async () => {
+test("a retained finding cannot split across outputs in either order", async () => {
   const validate = await createScanMergeValidator(pluginRoot);
   const inputs = [input("one"), input("two")];
   const group = finding();
@@ -208,7 +208,7 @@ test("indexed attribution keeps aggregate matching order and validates again aft
     "previously accepted finding identity",
   );
   expect(() => validate(submission([retained, split]), [], previous)).toThrow(
-    "more than once",
+    "previously accepted finding identity",
   );
   expect({ previous, retained, split }).toEqual(before);
 });

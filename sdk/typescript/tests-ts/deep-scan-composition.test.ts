@@ -470,11 +470,13 @@ describe("ordinary scan composition", () => {
         if (fatalMergeFailure) await expect(execution).rejects.toBe(failure);
         else
           await expect(execution).rejects.toThrow(
-            discoveryLimit
-              ? "consecutive error limit"
-              : priorFailures === 3
-                ? "consecutive merge error limit"
-                : failure.message,
+            kind === "failed discovery"
+              ? "saved Deep Scan is failed"
+              : discoveryLimit
+                ? "consecutive error limit"
+                : priorFailures === 3
+                  ? "consecutive merge error limit"
+                  : failure.message,
           );
         expect(attempts).toBe(
           discoveryLimit ? 0 : fatalMergeFailure ? 1 : 3 - priorFailures,
@@ -1496,4 +1498,43 @@ describe("ordinary scan composition", () => {
       }
     },
   );
+});
+
+test.each(["failed", "canceled"] as const)(
+  "does not execute a saved %s checkpoint",
+  async (terminalReason) => {
+    const h = await harness();
+    const checkpoint: DeepScanCheckpoint = {
+      version: 2,
+      startedAt: h.input.startedAt,
+      passes: [],
+      mergedScanIds: [],
+      aggregate: null,
+      noNewStreak: 0,
+      consecutiveErrors: 0,
+      terminalReason,
+    };
+    const path = join(h.input.scanDir, DEEP_SCAN_CHECKPOINT);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify(checkpoint));
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      `saved Deep Scan is ${terminalReason}`,
+    );
+    expect(h.calls).toEqual([]);
+    expect(h.mergeInputs).toEqual([]);
+    expect(h.published).toEqual([]);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(checkpoint);
+  },
+);
+
+test("caps an expired empty composition without requesting a model merge", async () => {
+  const h = await harness();
+  h.input.startedAt = "2000-01-01T00:00:00.000Z";
+  const result = await runDeepScans(h.input);
+  expect(h.calls).toEqual([]);
+  expect(h.mergeInputs).toEqual([]);
+  expect(result.terminalReason).toBe("capped");
+  expect(result.aggregate?.findings).toEqual([]);
+  expect(result.aggregate?.coverage["completeness"]).toBe("partial");
+  expect(h.published).toHaveLength(1);
 });

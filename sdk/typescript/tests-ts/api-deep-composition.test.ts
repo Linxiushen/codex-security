@@ -102,6 +102,9 @@ afterEach(async () => {
 });
 
 test.each([
+  { workers: 1, budget: false, emptyDeadline: true },
+  { workers: 1, budget: false, emptyDeadline: true, lostCompletion: true },
+  { workers: 1, budget: false, knowledge: true },
   { workers: 1, budget: false, provider: undefined },
   { workers: 2, budget: false, provider: undefined },
   { workers: 1, budget: true, provider: undefined },
@@ -146,6 +149,9 @@ test.each([
   usage?: "missing-merge" | "missing-child" | "unreported-cache";
   requiredCost?: boolean;
   logFailure?: boolean;
+  emptyDeadline?: boolean;
+  lostCompletion?: boolean;
+  knowledge?: boolean;
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -160,6 +166,9 @@ test.each([
     usage,
     requiredCost,
     logFailure,
+    emptyDeadline,
+    lostCompletion,
+    knowledge,
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -170,6 +179,8 @@ test.each([
     const repo = join(root, "repo");
     const codexHome = join(root, "codex");
     let scanDir = join(root, "scan");
+    const knowledgePath = join(root, "policy.md");
+    if (knowledge) await writeFile(knowledgePath, "Original policy.");
     await Promise.all([mkdir(repo), mkdir(codexHome)]);
     await Promise.all(
       ["app.py", "routes.py", "models.py", "helpers.py"].map((name) =>
@@ -373,7 +384,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               userContext: "Inspect the synthetic source.",
             },
             recipe: nativeRecipe ?? {
-              postScanPrompt: "Post-scan instructions once.",
+              postScanPrompt: emptyDeadline
+                ? undefined
+                : "Post-scan instructions once.",
             },
             savedDeepScanSettings: {
               workers,
@@ -479,9 +492,24 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                 recipe: JSON.parse(input!).recipe,
               });
               workbenches.set(scanId, options);
+              if (knowledge && JSON.parse(input!).recipe.mode === "deep")
+                await writeFile(knowledgePath, "Changed policy.");
+              if (emptyDeadline && JSON.parse(input!).recipe.mode === "deep")
+                result["startedAt"] = "2020-01-01T00:00:00Z";
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
+            if (
+              (knowledge || lostCompletion) &&
+              !interrupted &&
+              args[0] === "prepare-scan-completion" &&
+              registrations.get(id!)?.["mode"] === "deep"
+            ) {
+              interrupted = true;
+              controller.abort(
+                new ScanTransportClosedError("synthetic_lost_completion"),
+              );
+            }
             if (
               native === "sealed" &&
               !interrupted &&
@@ -563,6 +591,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                       );
                       expect(scan).toMatchObject({ scanId: id, findings: [] });
                     }
+                  }
+                  if (knowledge) {
+                    expect(
+                      await readFile(
+                        join(
+                          env["CODEX_SECURITY_KNOWLEDGE_BASE"]!,
+                          "0-policy.md.txt",
+                        ),
+                        "utf8",
+                      ),
+                    ).toBe("Original policy.");
                   }
                   turns.push({
                     id,
@@ -923,6 +962,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
     try {
       const scanOptions: ScanOptions = {
         mode: "deep",
+        ...(knowledge ? { knowledgeBasePaths: [knowledgePath] } : {}),
         preserveProviderEnvironment: provider !== undefined,
         workers,
         subagents: 3,
@@ -940,7 +980,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           : trackingFailure || requiredCost
             ? { maxCostUsd: 1 }
             : {}),
-        postScanPrompt: "Post-scan instructions once.",
+        postScanPrompt: emptyDeadline
+          ? undefined
+          : "Post-scan instructions once.",
         onProgress: (update) => progress.push(update),
         onActivity: (activity) => workerRun.activities.push(activity),
         onSessionEvent: (event) => workerRun.sessions.push(event),
@@ -986,6 +1028,53 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           expect(scan.continuationThreadId).not.toBe(id);
         }
       };
+      if (emptyDeadline) {
+        if (lostCompletion) {
+          await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+          controller = new AbortController();
+          scanOptions.resumeScanId = [...registrations.keys()][0]!;
+        }
+        const result = await run();
+        expect(result.threadId).toBeNull();
+        expect(result.findings.findings).toEqual([]);
+        expect(result.coverage.completeness).toBe("partial");
+        expect(turns).toEqual([]);
+        expect(mergeAttempts).toBe(0);
+        expect(registrations.size).toBe(1);
+        const manifest = await readFile(join(scanDir, "scan-manifest.json"));
+        scanOptions.resumeScanId = result.manifest.scan.id;
+        await expect(run()).rejects.toThrow("Resume requires a running scan");
+        expect(await readFile(join(scanDir, "scan-manifest.json"))).toEqual(
+          manifest,
+        );
+        expect(turns).toEqual([]);
+        return;
+      }
+      if (knowledge) {
+        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        const count = turns.length;
+        expect(count).toBeGreaterThan(0);
+        const scanId = [...registrations].find(
+          ([, value]) => value["mode"] === "deep",
+        )![0];
+        const manifest = await readFile(join(scanDir, "scan-manifest.json"));
+        controller = new AbortController();
+        scanOptions.resumeScanId = scanId;
+        await expect(run()).rejects.toThrow("knowledge base changed");
+        expect(turns).toHaveLength(count);
+        expect(await readFile(join(scanDir, "scan-manifest.json"))).toEqual(
+          manifest,
+        );
+        const saved = await runWorkbench(commandOptions, [
+          "get-scan",
+          "--scan-id",
+          scanId,
+        ]);
+        expect(saved["scan"]).toMatchObject({
+          progress: { status: "running" },
+        });
+        return;
+      }
       if (firstChildBudget) {
         await expect(run()).rejects.toBeInstanceOf(ScanCostLimitExceededError);
         expect(mergeAttempts).toBe(0);
@@ -1437,7 +1526,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           result.manifest.scan.id,
         ]);
         const scan = saved["scan"] as ScanLogSource;
-        expect(scan.continuationThreadId).toBe(result.threadId);
+        expect(scan.continuationThreadId).toBe(result.threadId!);
         await assertFollowUpLogs(scan);
       }
       if (budget) {

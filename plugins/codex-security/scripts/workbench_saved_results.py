@@ -12,6 +12,7 @@ import re
 import sqlite3
 import stat
 import sys
+import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -58,6 +59,12 @@ _PUBLISHED_OUTPUTS = (
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
 )
+
+
+class ReportEvidenceCollision(ContractError):
+    """A retained finding report cannot be projected without overwriting evidence."""
+
+
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
@@ -1361,14 +1368,22 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
             slug = f"{child['id']}-{report.parent.name}"
             writeup["reportPath"] = f"findings/{slug}/{slug}.md"
             for path in (child_dir / report.parent).rglob("*"):
-                if path.is_dir():
-                    continue
                 relative = path.relative_to(child_dir).as_posix()
                 destination = (
                     writeup["reportPath"]
                     if relative == report.as_posix()
                     else f"findings/{slug}/{path.relative_to(child_dir / report.parent).as_posix()}"
                 )
+                if (
+                    relative != report.as_posix()
+                    and unicodedata.normalize("NFC", destination).upper()
+                    == unicodedata.normalize("NFC", writeup["reportPath"]).upper()
+                ):
+                    raise ReportEvidenceCollision(
+                        f"Saved finding evidence conflicts with its projected report: {relative}."
+                    )
+                if path.is_dir():
+                    continue
                 with os.fdopen(
                     open_scan_local_file_descriptor(
                         child_dir,
@@ -1418,6 +1433,10 @@ def save_composed_checkpoint(
             continue
         try:
             draft = _stopped_child_draft(db, child, scan_dir)
+        except ReportEvidenceCollision:
+            # Do not seal a parent that silently omits an otherwise valid child.
+            # The stop finalizer retains the source and reports publication recovery.
+            raise
         except (ContractError, OSError, SystemExit, ValueError):
             continue
         if draft is None:

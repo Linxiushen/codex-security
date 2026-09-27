@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -38,6 +39,7 @@ interface SessionReasoning {
 }
 
 interface SessionUsage {
+  tracked: boolean;
   offset: number;
   fileVersion?: Stats;
   pendingLine: Buffer[];
@@ -52,7 +54,7 @@ interface SessionUsage {
   usage: ScanTokenUsage | null;
   calls: Map<string, ScanActivity>;
   activities: ScanActivity[];
-  progress: ScanProgress[];
+  progress?: ScanProgress[];
   filesCompleted: number;
   filesTotal: number | null;
   prose: Set<string>;
@@ -86,6 +88,7 @@ const SESSION_READ_SIZE = 64 * 1_024;
 
 function createSessionUsage(): SessionUsage {
   return {
+    tracked: false,
     offset: 0,
     pendingLine: [],
     pendingLineBytes: 0,
@@ -99,7 +102,6 @@ function createSessionUsage(): SessionUsage {
     usage: null,
     calls: new Map(),
     activities: [],
-    progress: [],
     filesCompleted: 0,
     filesTotal: null,
     prose: new Set(),
@@ -117,7 +119,8 @@ export class ScanCostTracker {
   readonly #reportedProgress = new Set<string>();
   #threadId: string | null = null;
   #timer: NodeJS.Timeout | null = null;
-  #pending: Promise<void> = Promise.resolve();
+  #activeRefresh: Promise<void> | null = null;
+  #queuedRefresh: Promise<void> | null = null;
   #snapshot: ScanCostSnapshot = { usage: null, cost: null };
   #lastCost: string | null = null;
   #highestFilesCompleted = 0;
@@ -158,25 +161,10 @@ export class ScanCostTracker {
     ) {
       return;
     }
-    let polling = false;
-    let rerun = false;
     const poll = () => {
-      if (polling) {
-        rerun = true;
-        return;
-      }
-      polling = true;
-      void this.refresh()
-        .catch((error: unknown) => {
-          this.#options.onError?.(error);
-        })
-        .finally(() => {
-          polling = false;
-          if (rerun && this.#timer !== null) {
-            rerun = false;
-            poll();
-          }
-        });
+      void this.refresh().catch((error: unknown) => {
+        this.#options.onError?.(error);
+      });
     };
     this.#timer = setInterval(poll, COST_POLL_INTERVAL_MS);
     this.#timer.unref();
@@ -184,12 +172,36 @@ export class ScanCostTracker {
   }
 
   public async refresh(): Promise<ScanCostSnapshot> {
-    const update = this.#pending.then(async () => {
-      await this.#readSessions();
-    });
-    this.#pending = update.catch(() => {});
+    const update =
+      this.#activeRefresh === null
+        ? this.#startRefresh()
+        : (this.#queuedRefresh ??= this.#activeRefresh
+            .catch(() => {})
+            .then(() => this.#readSessions()));
     await update;
     return this.#snapshot;
+  }
+
+  #startRefresh(): Promise<void> {
+    const update = Promise.resolve().then(() => this.#readSessions());
+    this.#activeRefresh = update;
+    void update.then(
+      () => this.#finishRefresh(update),
+      () => this.#finishRefresh(update),
+    );
+    return update;
+  }
+
+  #finishRefresh(finished: Promise<void>): void {
+    if (this.#activeRefresh !== finished) return;
+    const queued = this.#queuedRefresh;
+    this.#activeRefresh = queued;
+    this.#queuedRefresh = null;
+    if (queued !== null)
+      void queued.then(
+        () => this.#finishRefresh(queued),
+        () => this.#finishRefresh(queued),
+      );
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
@@ -231,17 +243,15 @@ export class ScanCostTracker {
           session = createSessionUsage();
           this.#sessions.set(path, session);
         }
+        // Historical sessions need only ownership metadata until associated
+        // with this scan. Replay their complete transcript when that happens.
+        if (session.threadId !== null) continue;
         // Reuse one buffer per I/O slot, not one allocation per historical log.
         const buffer = (buffers[pending.length] ??=
           Buffer.alloc(SESSION_READ_SIZE));
         const tracked = session;
         pending.push(
-          readSessionUsage(
-            path,
-            tracked,
-            this.#options.repository,
-            buffer,
-          ).then(
+          readSessionUsage(path, tracked, undefined, buffer, true).then(
             () => null,
             (error: unknown) => ({ session: tracked, error }),
           ),
@@ -304,16 +314,25 @@ export class ScanCostTracker {
       const threadId = tracked.threadId;
       if (threadId === null || !included.has(threadId)) continue;
       let session = tracked;
-      if (
-        this.#options.onSessionEvent !== undefined &&
-        session.events === undefined
-      ) {
-        // Replay only newly associated sessions, including their early events.
+      if (!session.tracked) {
         session = createSessionUsage();
-        session.events = [];
-        await readSessionUsage(path, session, this.#options.repository);
+        session.tracked = true;
+        if (this.#options.onSessionEvent !== undefined) session.events = [];
+        if (
+          threadId !== this.#threadId &&
+          this.#options.onProgress !== undefined
+        )
+          session.progress = [];
         this.#sessions.set(path, session);
       }
+      await readSessionUsage(
+        path,
+        session,
+        threadId !== this.#threadId && this.#options.onActivity !== undefined
+          ? this.#options.repository
+          : undefined,
+        buffers[0],
+      );
       const worker =
         threadId === this.#threadId
           ? this.#options.workerNumber?.(threadId)
@@ -365,7 +384,7 @@ export class ScanCostTracker {
     if (this.#options.onProgress === undefined || session.threadId === null) {
       return;
     }
-    for (const progress of session.progress.splice(0)) {
+    for (const progress of session.progress?.splice(0) ?? []) {
       const expectedFilesTotal = this.#expectedFilesTotal;
       if (
         (expectedFilesTotal !== undefined &&
@@ -433,6 +452,7 @@ async function readSessionUsage(
   session: SessionUsage,
   repository?: string,
   buffer?: Buffer,
+  metadataOnly = false,
 ): Promise<void> {
   if (session.unreadable) return;
   let metadata;
@@ -475,13 +495,19 @@ async function readSessionUsage(
       if (bytesRead === 0) break;
       session.offset += bytesRead;
       try {
-        readSessionChunk(buffer.subarray(0, bytesRead), session, repository);
+        readSessionChunk(
+          buffer.subarray(0, bytesRead),
+          session,
+          repository,
+          metadataOnly,
+        );
       } catch (error) {
         session.unreadable = true;
         session.pendingLine = [];
         session.pendingLineBytes = 0;
         throw error;
       }
+      if (metadataOnly && session.threadId !== null) break;
     }
   } finally {
     await file.close();
@@ -493,6 +519,7 @@ function readSessionChunk(
   contents: Buffer,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): void {
   let lineStart = 0;
   while (lineStart < contents.length) {
@@ -510,17 +537,24 @@ function readSessionChunk(
     }
 
     if (session.pendingLineBytes === 0) {
-      readSessionEvent(fragment.toString("utf8"), session, repository);
+      readSessionEvent(
+        fragment.toString("utf8"),
+        session,
+        repository,
+        metadataOnly,
+      );
     } else {
       if (fragment.length > 0) session.pendingLine.push(Buffer.from(fragment));
       readSessionEvent(
         Buffer.concat(session.pendingLine, lineBytes).toString("utf8"),
         session,
         repository,
+        metadataOnly,
       );
       session.pendingLine = [];
       session.pendingLineBytes = 0;
     }
+    if (metadataOnly && session.threadId !== null) return;
     lineStart = newline + 1;
   }
 }
@@ -529,6 +563,7 @@ function readSessionEvent(
   line: string,
   session: SessionUsage,
   repository?: string,
+  metadataOnly = false,
 ): void {
   if (line.length === 0) return;
   let event: unknown;
@@ -556,6 +591,7 @@ function readSessionEvent(
     session.events?.push(event);
     return;
   }
+  if (metadataOnly) return;
   if (session.replaying) {
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
@@ -581,7 +617,7 @@ function readSessionEvent(
   }
   session.events?.push(event);
   if (event["type"] === "response_item") {
-    session.progress.push(...sessionProgressUpdates(payload));
+    session.progress?.push(...sessionProgressUpdates(payload));
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -602,10 +638,7 @@ function readSessionEvent(
           },
           repository,
         );
-        if (
-          activity === null ||
-          session.prose.has(`${activity.kind}:${activity.description}`)
-        ) {
+        if (activity === null || session.prose.has(proseKey(activity))) {
           continue;
         }
         session.reasoning = {
@@ -640,12 +673,12 @@ function readSessionEvent(
       session.reasoning = null;
       if (
         activity.kind === "message" &&
-        session.prose.has(`${activity.kind}:${activity.description}`)
+        session.prose.has(proseKey(activity))
       ) {
         return;
       }
       if (activity.kind === "message") {
-        session.prose.add(`${activity.kind}:${activity.description}`);
+        session.prose.add(proseKey(activity));
       }
       if (activity.status === "running") {
         session.calls.set(activity.id, activity);
@@ -681,7 +714,7 @@ function readSessionEvent(
       payload["type"] === "agent_message" &&
       typeof payload["message"] === "string"
     ) {
-      session.progress.push(
+      session.progress?.push(
         ...scanProgressUpdatesFromEvent({
           type: "item.completed",
           item: { type: "agent_message", text: payload["message"] },
@@ -695,11 +728,8 @@ function readSessionEvent(
     }
     session.reasoning = null;
     const activity = scanActivityFromSessionEvent(event, repository);
-    if (
-      activity !== null &&
-      !session.prose.has(`${activity.kind}:${activity.description}`)
-    ) {
-      session.prose.add(`${activity.kind}:${activity.description}`);
+    if (activity !== null && !session.prose.has(proseKey(activity))) {
+      session.prose.add(proseKey(activity));
       session.activities.push(activity);
     }
     return;
@@ -796,8 +826,19 @@ function recordReasoningActivity(
     return;
   }
   reasoning.activity = activity;
-  session.prose.add(`${activity.kind}:${activity.description}`);
+  session.prose.add(proseKey(activity));
   session.activities.push(activity);
+}
+
+function proseKey(activity: ScanActivity): string {
+  // Deduplication needs an identity, not a retained copy of every transcript
+  // message and every expanding reasoning prefix.
+  // Hash UTF-16 code units to keep distinct lone surrogates distinct too.
+  return createHash("sha256")
+    .update(activity.kind)
+    .update(":")
+    .update(activity.description, "utf16le")
+    .digest("hex");
 }
 
 function sessionProgressUpdates(

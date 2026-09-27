@@ -18,6 +18,50 @@ CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
 EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
+@pytest.mark.parametrize("alias", ["exact", "case", "directory"])
+def test_stopped_projection_cannot_overwrite_report_with_evidence(tmp_path: Path, alias: str):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("\n" * 50)
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
+    child = register(state, target, child_dir, parent=parent["scanId"])
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    document = json.loads(findings_path.read_text())
+    document["findings"][0]["writeup"] = {"reportPath": "findings/issue/issue.md"}
+    findings_path.write_text(json.dumps(document))
+    reports = child_dir / "findings/issue"
+    reports.mkdir(parents=True)
+    report = reports / "issue.md"
+    report.write_text("# Original report\n")
+    name = f"{child['scanId']}-issue.md"
+    evidence = reports / (name.upper() if alias == "case" else name)
+    if alias == "directory":
+        evidence.mkdir()
+        evidence = evidence / "trace.txt"
+    evidence.write_text("Synthetic supporting evidence\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(
+        state,
+        parent,
+        passes=[
+            {"directory": child_dir.relative_to(parent_dir).as_posix(), "scanId": child["scanId"]}
+        ],
+    )
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+    saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert saved["progress"]["status"] == "canceled"
+    assert any("conflicts with its projected report" in warning for warning in saved["warnings"])
+    projected = parent_dir / "findings" / f"{child['scanId']}-issue" / name
+    if projected.exists():
+        assert projected.read_bytes() == report.read_bytes()
+    assert report.read_text() == "# Original report\n"
+    assert evidence.read_text() == "Synthetic supporting evidence\n"
+
+
 def recipe(target: Path, mode: str = "standard") -> dict:
     return {
         "repository": str(target),

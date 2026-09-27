@@ -1467,13 +1467,16 @@ process.exit(1);
   };
   const assertCompleted = (response, label) => {
     const result = requireSuccessfulTool(response, label);
-    const { instructions } = result;
+    const { instructions, usage, warnings, cost, ...paths } = result;
     assert.match(instructions, /is complete/);
     assert.match(
       instructions,
       /Do not call complete_codex_security_scan or start another scan/,
     );
-    assert.deepEqual(result, { ...expectedResult, instructions });
+    assert.deepEqual(paths, expectedResult);
+    assert.equal(usage.coverage, "unavailable");
+    assert.deepEqual(warnings, []);
+    assert.equal(cost, undefined);
     assert.deepEqual(response.content, [{ type: "text", text: instructions }]);
   };
 
@@ -1594,18 +1597,20 @@ process.exit(1);
       canceledResponse,
       `${runtimeLabel}: rejoin canceled scan`,
     );
-    const { instructions } = canceledResult;
+    const { instructions, usage, cost, warnings, ...retained } = canceledResult;
     assert.match(instructions, /was canceled/);
     assert.match(
       instructions,
       /Do not start additional scan work or claim complete coverage/,
     );
-    assert.deepEqual(canceledResult, {
+    assert.deepEqual(retained, {
       status: "canceled",
       scanId: canceledScan.scanId,
       scanDir: canceledScan.scanDir,
-      instructions,
     });
+    assert.equal(usage, undefined);
+    assert.deepEqual(warnings, []);
+    assert.equal(cost, undefined);
     assert.deepEqual(canceledResponse.content, [
       { type: "text", text: instructions },
     ]);

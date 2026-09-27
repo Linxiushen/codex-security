@@ -826,6 +826,19 @@ four workers. Unknown keys are rejected.
 
 `max_time_hours` accepts positive values up to 96, including fractional hours.
 At the deadline, discovery stops; the scan combines and returns completed findings.
+If the deadline expires before any child starts, the result is an empty sealed
+report with partial coverage and a `null` `threadId`; no model turn is needed.
+Failed or canceled checkpoints are terminal and cannot be resumed as running work.
+
+Knowledge documents are extracted once for a Deep Scan. Every child receives the
+same immutable content, even if the original files change during the scan. Resume
+checks the saved content digest and rejects changed inputs before starting work.
+
+Merge inputs retain exact original findings and evidence. A compact index points
+to complete retained source and history records; the merger must read those records
+before consolidating findings. Host validation preserves every source reference,
+while merge-quality evaluation also checks independent issues, canonical repairs,
+and severity. See the [completed-report evaluation](scripts/merge-eval/README.md).
 
 `scan --workers` controls discovery workers within one deep scan;
 `bulk-scan --workers` controls how many repositories are scanned concurrently.

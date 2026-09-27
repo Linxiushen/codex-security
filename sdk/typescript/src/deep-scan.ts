@@ -126,6 +126,11 @@ export async function runDeepScans(
   }
   if (state.version !== 2)
     throw new Error("Unsupported saved Deep Scan checkpoint.");
+  if (state.terminalReason === "failed" || state.terminalReason === "canceled")
+    throw new ScanInterruptedError(
+      `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
+      scanDir,
+    );
   const passDirectory = (index: number): string =>
     `artifacts/deep-scan/passes/pass-${index + 1}`;
   for (const [index, pass] of state.passes.entries()) {
@@ -332,6 +337,14 @@ export async function runDeepScans(
         : [];
     });
     if (!pending.length && (!allowEmpty || state.aggregate !== null)) return;
+    if (!pending.length) {
+      state.aggregate = {
+        ...validateMerge({ scanId, findings: [] }, [], null).aggregate,
+        coverage: combineScanCoverage([], scanDir, [], state.legacy?.coverage),
+      };
+      await save();
+      return;
+    }
     const prompt = await scanMergePrompt(
       scanId,
       pending,

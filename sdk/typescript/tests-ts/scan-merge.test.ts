@@ -16,6 +16,7 @@ import {
   scanMergeInput,
   projectScanMergeWriteups,
   scanMergePrompt,
+  scanMergeModelInputs,
   type ScanAggregate,
 } from "../src/scan-merge.js";
 import {
@@ -646,6 +647,10 @@ describe("local scan merging", () => {
       let saved = "";
       const prompt = await scanMergePrompt(parent, [input], previous, root, {
         async restore(path, contents) {
+          if (path === "artifacts/deep-scan/merge-evidence.jsonl") {
+            expect(contents.byteLength).toBe(0);
+            return;
+          }
           expect(path).toBe("artifacts/deep-scan/merge-inputs.json");
           saved = Buffer.from(contents).toString("utf8");
         },
@@ -663,4 +668,122 @@ describe("local scan merging", () => {
       expect([...prompt].length).toBeLessThan(1 << 20);
     });
   }
+});
+
+test("consolidates accepted aliases without counting their retained lineage as novel", () => {
+  const a = child("alias-a", [finding("identity-a")]);
+  const b = child("alias-b", [finding("identity-b")]);
+  const previous = merge(
+    submission([a.draft.findings[0]!, b.draft.findings[0]!]),
+    [a, b],
+    null,
+  ).aggregate;
+  const combined = structuredClone(previous.findings[0]!);
+  provenance(combined)["sourceFindingIds"] = ["alias-a:0", "alias-b:0"];
+  const result = merge(submission([combined]), [], previous);
+  expect(result.newFindings).toBe(0);
+  expect(sources(result.aggregate.findings[0]!)).toHaveLength(2);
+  expect(provenance(result.aggregate.findings[0]!)["previousFindings"]).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ identity: { anchor: "identity-b" } }),
+    ]),
+  );
+  expect(previous.findings).toHaveLength(2);
+});
+
+test("requires justification for changed or conflicting severity", () => {
+  const source = child("severity");
+  const lower = structuredClone(source.draft.findings[0]!);
+  lower["severity"] = { level: "low", rationale: "Reworded only." };
+  expect(() => merge(submission([lower]), [source], null)).toThrow(
+    "severity.changeConditions",
+  );
+  (lower["severity"] as JsonObject)["changeConditions"] =
+    "A public deployment without the documented restriction would increase impact.";
+  (lower["severity"] as JsonObject)["rationale"] =
+    "The retained deployment evidence limits affected users to the isolated test environment.";
+  expect(
+    merge(submission([lower]), [source], null).aggregate.findings[0]![
+      "severity"
+    ],
+  ).toEqual(lower["severity"]);
+  expect(
+    sources(
+      merge(submission([lower]), [source], null).aggregate.findings[0]!,
+    )[0]!.finding["severity"],
+  ).toEqual({ level: "high" });
+});
+
+test.each(["child-issue.md", "CHILD-ISSUE.MD"])(
+  "does not overwrite a projected report with %s evidence",
+  async (name) => {
+    const directory = await mkdtemp(join(tmpdir(), "scan-report-collision-"));
+    directories.push(directory);
+    await mkdir(join(directory, "findings/issue"), { recursive: true });
+    await writeFile(
+      join(directory, "findings/issue/issue.md"),
+      "Original report",
+    );
+    await writeFile(
+      join(directory, "findings/issue", name),
+      "Supporting evidence",
+    );
+    const input = child("child", [
+      finding("issue", { writeup: { reportPath: "findings/issue/issue.md" } }),
+    ]);
+    input.scanDir = directory;
+    const writes = new Map<string, Uint8Array>();
+    await expect(
+      projectScanMergeWriteups(input, {
+        async restore(path, bytes) {
+          writes.set(path, bytes);
+        },
+      }),
+    ).rejects.toThrow("conflicts with its projected report");
+    expect(
+      Buffer.from(
+        writes.get("findings/child-issue/child-issue.md")!,
+      ).toString(),
+    ).toBe("Original report");
+    expect(
+      await readFile(join(directory, "findings/issue", name), "utf8"),
+    ).toBe("Supporting evidence");
+  },
+);
+
+test("compact merge inputs preserve complete indexed Unicode and oversized lineage", () => {
+  const original = finding("large", {
+    remediation: "Preserve the distinct tail repair Ω.",
+    summary: "filler ".repeat(20000) + "tail fact Ω",
+  });
+  const accepted = finding("canonical");
+  provenance(accepted)["sourceFindingIds"] = ["child:0"];
+  provenance(accepted)["sourceFindings"] = [
+    { id: "child:0", finding: original },
+  ];
+  provenance(accepted)["previousFindings"] = [
+    finding("earlier", { remediationTests: ["A distinct retained test."] }),
+  ];
+  const previous = submission([accepted]);
+  const before = structuredClone(previous);
+  const payload = scanMergeModelInputs([], previous);
+  const index = JSON.parse(payload.index.toString());
+  expect(payload.index.length).toBeLessThan(payload.evidence.length / 10);
+  expect(index.previous.findings[0].provenance.sourceFindingIds).toEqual([
+    "child:0",
+  ]);
+  expect(index.previous.findings[0].provenance.sourceFindings).toBeUndefined();
+  const restored = structuredClone(index.previous);
+  for (const entry of index.retainedEvidence) {
+    const record = JSON.parse(
+      payload.evidence
+        .subarray(entry.offset, entry.offset + entry.length)
+        .toString(),
+    );
+    expect(record.owner).toBe("previous:0");
+    (restored.findings[0].provenance[record.field] ??= [])[record.index] =
+      record.value;
+  }
+  expect(restored).toEqual(before);
+  expect(previous).toEqual(before);
 });

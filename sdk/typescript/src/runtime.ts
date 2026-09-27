@@ -106,10 +106,21 @@ print(json.dumps({
 const RESTORE_SCAN_ARTIFACT_PROGRAM = `
 from pathlib import Path
 from runpy import run_path
+import json
 import sys
 
 module = run_path(sys.argv[1])
 try:
+    if sys.argv[6] == "restoreMany":
+        for relative, length in json.loads(sys.stdin.buffer.readline()):
+            contents = sys.stdin.buffer.read(length)
+            if len(contents) != length:
+                raise module["ContractError"]("Incomplete artifact batch payload.")
+            module["write_scan_local_bytes"](
+                Path(sys.argv[2]), relative, contents,
+                expected_root_identity=(int(sys.argv[4]), int(sys.argv[5]))
+            )
+        sys.exit(0)
     operation = {
         "restore": "write_scan_local_bytes",
         "prepareDirectory": "prepare_scan_local_directory",
@@ -168,6 +179,10 @@ export interface WorkbenchCommandOptions {
 
 export interface ScanArtifactRestorer {
   restore(relativePath: string, contents: Uint8Array): Promise<void>;
+  /** Ordered writes through the same checked writer in one local process. */
+  restoreMany?(
+    artifacts: readonly { path: string; contents: Uint8Array }[],
+  ): Promise<void>;
 }
 
 function environmentValue(
@@ -1820,7 +1835,7 @@ export async function prepareScanArtifactRestorer(
   }
 
   const update = async (
-    operation: "restore" | "prepareDirectory" | "remove",
+    operation: "restore" | "restoreMany" | "prepareDirectory" | "remove",
     relativePath: string,
     contents?: Uint8Array,
   ): Promise<void> => {
@@ -1843,7 +1858,9 @@ export async function prepareScanArtifactRestorer(
         ],
         pluginHelperEnvironment(options.environment),
         contents,
-        options.signal,
+        operation === "restore" || operation === "restoreMany"
+          ? undefined
+          : options.signal,
       );
       if (!result.success) {
         throw new Error(
@@ -1853,9 +1870,8 @@ export async function prepareScanArtifactRestorer(
         );
       }
     } catch (error) {
-      if (options.signal?.aborted) throw error;
       throw new OutputDirectoryError(
-        operation === "restore"
+        operation === "restore" || operation === "restoreMany"
           ? "Could not safely restore a completed scan artifact."
           : "Could not safely update a scan artifact.",
         { cause: error },
@@ -1864,6 +1880,19 @@ export async function prepareScanArtifactRestorer(
   };
   return {
     restore: (path, contents) => update("restore", path, contents),
+    async restoreMany(artifacts) {
+      if (!artifacts.length) return;
+      const header = Buffer.from(
+        JSON.stringify(
+          artifacts.map(({ path, contents }) => [path, contents.byteLength]),
+        ) + "\n",
+      );
+      await update(
+        "restoreMany",
+        "",
+        Buffer.concat([header, ...artifacts.map(({ contents }) => contents)]),
+      );
+    },
     prepareDirectory: (path) => update("prepareDirectory", path),
     remove: (path) => update("remove", path),
   };
@@ -2538,7 +2567,11 @@ export async function bootstrapPlugin(
       : await pluginMetadata(join(marketplace, "plugins", PLUGIN_NAME)).catch(
           () => null,
         );
-  if (staged?.version !== version) {
+  const stagedRoot = join(marketplace, "plugins", PLUGIN_NAME);
+  const stagedMatches =
+    staged?.version === version &&
+    (await pluginContentsMatch(root, stagedRoot, options.signal));
+  if (!stagedMatches) {
     if (existing !== null) {
       await rm(marketplace, { recursive: true, force: true });
     }
@@ -2550,22 +2583,62 @@ export async function bootstrapPlugin(
       throw error;
     },
   );
-  const marketplaces = parse(config)["marketplaces"];
+  const configuration = parse(config);
+  const marketplaces = configuration["marketplaces"];
   const registration = isRecord(marketplaces)
     ? marketplaces[MARKETPLACE_NAME]
     : undefined;
-  if (
-    !isRecord(registration) ||
-    registration["source_type"] !== "local" ||
-    typeof registration["source"] !== "string" ||
-    !(await sameFile(registration["source"], marketplace))
-  ) {
+  const registered =
+    isRecord(registration) &&
+    registration["source_type"] === "local" &&
+    typeof registration["source"] === "string" &&
+    (await sameFile(registration["source"], marketplace));
+  if (!registered) {
     await run(
       command,
       ["plugin", "marketplace", "add", marketplace],
       environment,
       options.signal,
     );
+  }
+  // The startup lock serializes bootstraps, but other scans can still be using
+  // the installed tree. Even a same-version `plugin add` replaces that tree
+  // and leaves their MCP coordinators with a deleted working directory.
+  const installRecord = join(marketplace, "installed-plugin.json");
+  const previous: unknown = await readFile(installRecord, "utf8")
+    .then((value) => JSON.parse(value) as unknown)
+    .catch((error: unknown) => {
+      if (nodeErrorCode(error) === "ENOENT" || error instanceof SyntaxError)
+        return null;
+      throw error;
+    });
+  const plugins = configuration["plugins"];
+  const plugin = isRecord(plugins)
+    ? plugins[`${PLUGIN_NAME}@${MARKETPLACE_NAME}`]
+    : undefined;
+  if (
+    stagedMatches &&
+    registered &&
+    isRecord(plugin) &&
+    plugin["enabled"] === true &&
+    isRecord(previous) &&
+    typeof previous["installedPath"] === "string" &&
+    previous["version"] === version &&
+    (await pluginContentsMatch(
+      root,
+      previous["installedPath"],
+      options.signal,
+      true,
+    ))
+  ) {
+    return {
+      pluginRoot: root,
+      marketplaceRoot: marketplace,
+      installedRoot: previous["installedPath"],
+      marketplaceName: MARKETPLACE_NAME,
+      name,
+      version,
+    };
   }
   const output = await run(
     command,
@@ -2591,6 +2664,11 @@ export async function bootstrapPlugin(
       "Codex plugin install did not return the selected plugin path and version.",
     );
   }
+  await writeFile(
+    installRecord,
+    JSON.stringify({ installedPath: installed["installedPath"], version }),
+    { mode: 0o600, signal: options.signal },
+  );
   return {
     pluginRoot: root,
     marketplaceRoot: marketplace,
@@ -2599,6 +2677,58 @@ export async function bootstrapPlugin(
     name,
     version,
   };
+}
+
+async function pluginContentsMatch(
+  source: string,
+  destination: string,
+  signal?: AbortSignal,
+  allowExtraFiles = false,
+): Promise<boolean> {
+  throwIfSignalAborted(signal);
+  const sourceMetadata = await lstat(source);
+  const destinationMetadata = await lstat(destination).catch(
+    (error: unknown) => {
+      if (["ENOENT", "ENOTDIR"].includes(nodeErrorCode(error) ?? ""))
+        return null;
+      throw error;
+    },
+  );
+  if (destinationMetadata === null) return false;
+  if (sourceMetadata.isFile() && destinationMetadata.isFile()) {
+    if (
+      sourceMetadata.size !== destinationMetadata.size ||
+      (sourceMetadata.mode & 0o111) !== (destinationMetadata.mode & 0o111)
+    )
+      return false;
+    const [sourceBytes, destinationBytes] = await Promise.all([
+      readFile(source, { signal }),
+      readFile(destination, { signal }),
+    ]);
+    return sourceBytes.equals(destinationBytes);
+  }
+  if (!sourceMetadata.isDirectory() || !destinationMetadata.isDirectory())
+    return false;
+  const entries = await readdir(source);
+  // An installed plugin can accumulate runtime files such as __pycache__.
+  // Only the pristine marketplace copy must have exactly the source entries.
+  if (
+    !allowExtraFiles &&
+    entries.length !== (await readdir(destination)).length
+  )
+    return false;
+  for (const entry of entries) {
+    if (
+      !(await pluginContentsMatch(
+        join(source, entry),
+        join(destination, entry),
+        signal,
+        allowExtraFiles,
+      ))
+    )
+      return false;
+  }
+  return true;
 }
 
 export async function pluginMetadata(

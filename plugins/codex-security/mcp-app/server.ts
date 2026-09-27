@@ -1169,7 +1169,7 @@ export function createCodexSecurityServer(): McpServer {
             threadId,
           });
         }
-        const terminal = await nativeScanTerminalResult(scan);
+        const terminal = await nativeScanTerminalResult(scan, nativeScans);
         if (terminal) return terminal;
         await nativeScans.run(
           {
@@ -1207,6 +1207,7 @@ export function createCodexSecurityServer(): McpServer {
           if (isJsonObject(current?.scan)) {
             const terminal = await nativeScanTerminalResult(
               current.scan as unknown as ScanResults,
+              nativeScans,
             );
             if (terminal) return terminal;
           }
@@ -1224,22 +1225,9 @@ export function createCodexSecurityServer(): McpServer {
       "--defer-publication",
       ...optionalArg("--thread-id", threadId),
     ]);
-    await nativeScans.cancel(scanId);
-    const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
-    const scan = isJsonObject(current.scan) ? current.scan : undefined;
-    const retained = await runWorkbench([
-      "preserve-scan-results",
-      "--scan-id",
-      scanId,
-      "--after-stop",
-      ...optionalArg("--thread-id", threadId),
-      ...optionalArg(
-        "--claim-token",
-        typeof scan?.handoffClaimToken === "string"
-          ? scan.handoffClaimToken
-          : undefined,
-      ),
-    ]);
+    const retained = await finalizeNativeStoppedScan(scanId, nativeScans, {
+      threadId,
+    });
     return workspaceResult(retained.workspace as unknown as WorkspaceState);
   };
 
@@ -1750,14 +1738,9 @@ export function createCodexSecurityServer(): McpServer {
         message,
         ...optionalArg("--claim-token", handoffClaimToken),
       ]);
-      await nativeScans.cancel(scanId, message);
-      const failed = await runWorkbench([
-        "preserve-scan-results",
-        "--scan-id",
-        scanId,
-        "--after-stop",
-        ...optionalArg("--claim-token", handoffClaimToken),
-      ]);
+      const failed = await finalizeNativeStoppedScan(scanId, nativeScans, {
+        message,
+      });
       return scanActionResult(
         failed,
         "Recorded the Codex Security scan failure.",
@@ -2397,8 +2380,9 @@ function boundedErrorData(error: unknown): { message: string; name: string } {
 }
 
 async function nativeScanCompletedResult(scan: ScanResults) {
+  let completed: JsonObject;
   try {
-    await runWorkbench([
+    completed = await runWorkbench([
       "complete-scan",
       "--scan-id",
       scan.scanId,
@@ -2415,14 +2399,54 @@ async function nativeScanCompletedResult(scan: ScanResults) {
       scanDir: scan.scanDir,
       manifestPath: join(scan.scanDir, "scan-manifest.json"),
       reportPath: join(scan.scanDir, "report.md"),
+      ...nativeCompletionMetadata(completed.scan),
       instructions,
     },
   };
 }
 
-async function nativeScanTerminalResult(scan: ScanResults) {
+function nativeCompletionMetadata(value: unknown): JsonObject {
+  if (!isJsonObject(value)) return {};
+  return Object.fromEntries(
+    ["usage", "cost", "warnings"].flatMap((key) =>
+      value[key] === undefined ? [] : [[key, value[key]]],
+    ),
+  );
+}
+
+async function finalizeNativeStoppedScan(
+  scanId: string,
+  nativeScans: NativeScanHost,
+  { threadId, message }: { threadId?: string; message?: string } = {},
+) {
+  await nativeScans.cancel(scanId, message);
+  const current = await runWorkbench(["get-scan", "--scan-id", scanId]);
+  const scan = isJsonObject(current.scan) ? current.scan : undefined;
+  return runWorkbench([
+    "preserve-scan-results",
+    "--scan-id",
+    scanId,
+    "--after-stop",
+    ...optionalArg("--thread-id", threadId),
+    ...optionalArg(
+      "--claim-token",
+      typeof scan?.handoffClaimToken === "string"
+        ? scan.handoffClaimToken
+        : undefined,
+    ),
+  ]);
+}
+
+async function nativeScanTerminalResult(
+  scan: ScanResults,
+  nativeScans: NativeScanHost,
+) {
   const status = scan.progress?.status;
   if (status === "complete") return nativeScanCompletedResult(scan);
+  const retained =
+    status === "canceled" || status === "failed"
+      ? await finalizeNativeStoppedScan(scan.scanId, nativeScans)
+      : undefined;
   if (status === "canceled") {
     const instructions = `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`;
     return {
@@ -2431,15 +2455,25 @@ async function nativeScanTerminalResult(scan: ScanResults) {
         status: "canceled",
         scanId: scan.scanId,
         scanDir: scan.scanDir,
+        ...nativeCompletionMetadata(retained?.scan),
         instructions,
       },
     };
   }
   if (status === "failed") {
-    return toolErrorResult(
+    const instructions =
       scan.failureMessage ??
-        `Deep Scan ${scan.scanId} failed. Saved results remain available with incomplete coverage.`,
-    );
+      `Deep Scan ${scan.scanId} failed. Check retained results and publication warnings; coverage is incomplete.`;
+    return {
+      ...toolErrorResult(instructions),
+      structuredContent: {
+        status,
+        scanId: scan.scanId,
+        scanDir: scan.scanDir,
+        ...nativeCompletionMetadata(retained?.scan),
+        instructions,
+      },
+    };
   }
   return undefined;
 }

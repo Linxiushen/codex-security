@@ -248,6 +248,7 @@ async function preserveScanDraft(
     const final = sources.find((source) => source.complete !== false);
     if (final) result = structuredClone(final);
   }
+  const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
   )?.scope;
@@ -359,7 +360,7 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...dispositions.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
@@ -368,6 +369,13 @@ async function preserveScanDraft(
         const candidateId = item.candidateId ?? item.id;
         return (
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
+          !(
+            Array.isArray(item.surfaceIds) &&
+            item.surfaceIds.length > 0 &&
+            item.surfaceIds.every(
+              (id) => typeof id === "string" && resolvedSurfaces.has(id),
+            )
+          ) &&
           !coverageEntryPresent(result.coverage.deferred as unknown[], item)
         );
       }),
@@ -651,6 +659,48 @@ function coverageEntryIdentities(entry: JsonObject): string[] {
     ];
   }
   return [];
+}
+
+/** Explicit, unambiguous resolution closes historical work; omission does not. */
+function resolvedCoverageSurfaceIds(
+  coverage: JsonObject,
+  sources: ScanDraftInput[],
+): Set<string> {
+  const key = (surface: JsonObject) =>
+    JSON.stringify([surface.label, surface.riskArea ?? null]);
+  const historical = new Map<string, string | null>();
+  for (const source of sources)
+    for (const surface of source.coverage.surfaces as JsonObject[]) {
+      if (typeof surface.id !== "string") continue;
+      const identity = key(surface);
+      historical.set(
+        surface.id,
+        historical.has(surface.id) && historical.get(surface.id) !== identity
+          ? null
+          : identity,
+      );
+    }
+  const surfaces = coverage.surfaces as JsonObject[];
+  const counts = new Map<string, number>();
+  for (const surface of surfaces)
+    if (typeof surface.id === "string")
+      counts.set(surface.id, (counts.get(surface.id) ?? 0) + 1);
+  const pending = new Set(
+    (coverage.deferred as JsonObject[]).flatMap((row) =>
+      Array.isArray(row.surfaceIds) ? row.surfaceIds : [],
+    ),
+  );
+  return new Set(
+    surfaces.flatMap((surface) =>
+      typeof surface.id === "string" &&
+      counts.get(surface.id) === 1 &&
+      surface.disposition !== "needs_follow_up" &&
+      !pending.has(surface.id) &&
+      historical.get(surface.id) === key(surface)
+        ? [surface.id]
+        : [],
+    ),
+  );
 }
 
 /** Keep saved coverage that the current draft has not resolved. */

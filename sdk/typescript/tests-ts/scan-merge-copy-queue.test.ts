@@ -206,61 +206,66 @@ test.each([
   { nested: true, fail: false },
   { nested: false, fail: true },
   { nested: true, fail: true },
-])("renamed report aliases stay ordered: %j", async ({ nested, fail }) => {
-  const alias = `CHILD-CAFE\u0301.MD${nested ? "/proof.bin" : ""}`;
-  const { input } = await fixture(["café"], [alias]);
-  const started = Promise.withResolvers<void>();
-  const enumerated = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
-  const reason = new Error("report failed before its alias");
-  const original = fs.readdir;
-  const enumerate = spyOn(fs, "readdir").mockImplementation(async (...args) => {
-    const entries = await Reflect.apply(original, fs, args);
-    if (
-      args[0] ===
-      join(input.scanDir, "findings/café", nested ? dirname(alias) : "")
-    )
-      enumerated.resolve();
-    return entries;
-  });
-  const originalRead = contract.readScanFile;
-  const paths: string[] = [];
-  const read = spyOn(contract, "readScanFile").mockImplementation(
-    async (...args) => {
-      paths.push(args[1]);
-      return originalRead(...args);
-    },
-  );
-  const writes: string[] = [];
-  const pending = projectScanMergeWriteups(input, {
-    async restore(path) {
-      writes.push(path);
-      if (path.endsWith("child-café.md")) {
-        started.resolve();
-        await release.promise;
-        if (fail) throw reason;
-      }
-    },
-  }).then(
-    () => undefined,
-    (error: unknown) => error,
-  );
-  try {
-    await Promise.all([started.promise, enumerated.promise]);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(paths).toEqual(["findings/café/report.md"]);
-    expect(writes).toEqual(["findings/child-café/child-café.md"]);
-    release.resolve();
-    expect(await pending).toBe(fail ? reason : undefined);
-    expect(paths).toHaveLength(fail ? 1 : 2);
-    expect(writes).toHaveLength(fail ? 1 : 2);
-  } finally {
-    release.resolve();
-    await pending;
-    read.mockRestore();
-    enumerate.mockRestore();
-  }
-});
+])(
+  "evidence cannot overwrite a renamed report: %j",
+  async ({ nested, fail }) => {
+    const alias = `CHILD-CAFE\u0301.MD${nested ? "/proof.bin" : ""}`;
+    const { input } = await fixture(["café"], [alias]);
+    const started = Promise.withResolvers<void>();
+    const enumerated = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const reason = new Error("report failed before its alias");
+    const original = fs.readdir;
+    const enumerate = spyOn(fs, "readdir").mockImplementation(
+      async (...args) => {
+        const entries = await Reflect.apply(original, fs, args);
+        if (args[0] === join(input.scanDir, "findings/café"))
+          enumerated.resolve();
+        return entries;
+      },
+    );
+    const originalRead = contract.readScanFile;
+    const paths: string[] = [];
+    const read = spyOn(contract, "readScanFile").mockImplementation(
+      async (...args) => {
+        paths.push(args[1]);
+        return originalRead(...args);
+      },
+    );
+    const writes: string[] = [];
+    const pending = projectScanMergeWriteups(input, {
+      async restore(path) {
+        writes.push(path);
+        if (path.endsWith("child-café.md")) {
+          started.resolve();
+          await release.promise;
+          if (fail) throw reason;
+        }
+      },
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    try {
+      await Promise.all([started.promise, enumerated.promise]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(paths).toEqual(["findings/café/report.md"]);
+      expect(writes).toEqual(["findings/child-café/child-café.md"]);
+      release.resolve();
+      const error = await pending;
+      if (fail) expect(error).toBe(reason);
+      else
+        expect(String(error)).toContain("conflicts with its projected report");
+      expect(paths).toHaveLength(1);
+      expect(writes).toHaveLength(1);
+    } finally {
+      release.resolve();
+      await pending;
+      read.mockRestore();
+      enumerate.mockRestore();
+    }
+  },
+);
 
 test("an invalid report is rejected before evidence enumeration or writes", async () => {
   const { input } = await fixture(["issue"], ["proof.bin"]);

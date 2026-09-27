@@ -282,7 +282,19 @@ async function verifyPermissionProfile(options: {
   } finally {
     lines.close();
     child.kill();
-    await closed;
+    const forcedTermination = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null)
+        child.kill("SIGKILL");
+      // Descendants may retain inherited pipes after the direct child exits.
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    }, 1_000);
+    try {
+      await closed;
+    } finally {
+      clearTimeout(forcedTermination);
+    }
   }
 }
 

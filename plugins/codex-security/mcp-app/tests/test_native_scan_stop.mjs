@@ -242,7 +242,7 @@ for (const operation of ["cancel", "fail"]) {
       `${operation}-scan`,
       "drain",
       "drained",
-      ...(operation === "cancel" ? ["get-scan"] : []),
+      "get-scan",
       "preserve-scan-results",
     ]);
     interrupted = false;
@@ -252,5 +252,111 @@ for (const operation of ["cancel", "fail"]) {
       "synthetic-child-finding",
     ]);
     assert.equal(context.recipe, undefined);
+  });
+}
+
+const nativeMeta = {
+  _meta: {
+    "openai/threadId": "synthetic-owner",
+    "codex/sandbox-state-meta": {
+      sandboxCwd: pathToFileURL(dirname(entrypoint)).href,
+      permissionProfile: {
+        type: "managed",
+        file_system: { type: "unrestricted" },
+        network: "restricted",
+      },
+    },
+  },
+};
+
+for (const status of ["canceled", "failed"]) {
+  test(`rejoining a ${status} scan finishes interrupted stop publication`, async () => {
+    const events = [];
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status },
+      warnings: ["Synthetic retained publication warning"],
+    };
+    const server = serverFor({
+      async workbench([command, ...args]) {
+        if (command === "list-scans") return {};
+        if (command === "resolve-scan-root")
+          return { scanRoot: "/synthetic/scans" };
+        events.push(command);
+        if (command === "preserve-scan-results") {
+          assert.ok(args.includes("--after-stop"));
+          assert.equal(
+            args[args.indexOf("--claim-token") + 1],
+            scan.handoffClaimToken,
+          );
+          return { scan, workspace: { results: scan } };
+        }
+        assert.ok(["begin-deep-scan", "get-scan"].includes(command));
+        return { scan };
+      },
+      async run() {
+        assert.fail("Terminal scans cannot launch a runner");
+      },
+      async cancel(id) {
+        assert.equal(id, scan.scanId);
+        events.push("drain");
+      },
+    });
+    // The saved terminal state may predate publication; rejoin must be repeatable.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await server.tools.get("start_codex_security_deep_scan")(
+        { scanId: scan.scanId, handoffClaimToken: scan.handoffClaimToken },
+        nativeMeta,
+      );
+      assert.equal(result.isError === true, status === "failed");
+      assert.deepEqual(result.structuredContent.warnings, scan.warnings);
+    }
+    assert.deepEqual(
+      events,
+      Array(2)
+        .fill(["begin-deep-scan", "drain", "get-scan", "preserve-scan-results"])
+        .flat(),
+    );
+  });
+}
+
+for (const completed of [false, true]) {
+  test(`native completion returns sealed accounting (rejoin=${completed})`, async () => {
+    const metadata = {
+      usage: { inputTokens: 100, outputTokens: 10 },
+      cost: { estimatedUsd: 0.25 },
+      warnings: ["Synthetic incomplete coverage"],
+    };
+    const scan = {
+      scanId: "synthetic-parent",
+      scanDir: "/synthetic/scan",
+      handoffClaimToken: "synthetic-claim",
+      progress: { status: completed ? "complete" : "running" },
+    };
+    const server = serverFor({
+      async workbench([command]) {
+        if (command === "list-scans") return {};
+        if (command === "resolve-scan-root")
+          return { scanRoot: "/synthetic/scans" };
+        if (command === "begin-deep-scan") return { scan };
+        assert.equal(command, "complete-scan");
+        return {
+          scan: { ...scan, ...metadata, recipe: { private: "not public" } },
+        };
+      },
+      async run() {
+        return {};
+      },
+    });
+    const result = await server.tools.get("start_codex_security_deep_scan")(
+      { scanId: scan.scanId, handoffClaimToken: scan.handoffClaimToken },
+      nativeMeta,
+    );
+    assert.notEqual(result.isError, true);
+    for (const key of Object.keys(metadata))
+      assert.deepEqual(result.structuredContent[key], metadata[key]);
+    assert.equal(result.structuredContent.recipe, undefined);
   });
 }

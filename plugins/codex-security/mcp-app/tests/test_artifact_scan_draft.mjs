@@ -1055,6 +1055,96 @@ try {
   );
   assert.equal(monotonicWrites, 2);
 
+  for (const terminal of [false, true]) {
+    const pendingRoot = path.join(root, `candidate-resolution-${terminal}`);
+    await mkdir(pendingRoot);
+    const pendingContext = { ...context, root: pendingRoot };
+    const pending = {
+      ...input,
+      complete: false,
+      findings: [],
+      coverage: {
+        completeness: "partial",
+        explicitExclusions: [],
+        surfaces: [
+          {
+            id: "pending-surface",
+            candidateId: "pending-candidate",
+            label: "Synthetic review",
+            disposition: "needs_follow_up",
+          },
+        ],
+        deferred: [
+          {
+            candidateId: "pending-candidate",
+            reason: "Dependency evidence remains unavailable.",
+          },
+        ],
+      },
+    };
+    await recordCodexSecurityScanDraft(pendingContext, pending);
+    await recordCodexSecurityScanDraft(pendingContext, {
+      ...pending,
+      complete: terminal,
+      coverage: {
+        ...pending.coverage,
+        completeness: terminal ? "complete" : "partial",
+        surfaces: terminal
+          ? [{ ...pending.coverage.surfaces[0], disposition: "rejected" }]
+          : [],
+        deferred: terminal ? [] : pending.coverage.deferred,
+      },
+    });
+    const saved = await readJson(pendingRoot, "coverage.json");
+    assert.equal(saved.completeness, terminal ? "complete" : "partial");
+    assert.equal(
+      saved.surfaces[0].disposition,
+      terminal ? "rejected" : "needs_follow_up",
+    );
+    assert.equal(saved.deferred.length, terminal ? 0 : 1);
+  }
+  const surfaceRoot = path.join(root, "explicit-surface-resolution");
+  await mkdir(surfaceRoot);
+  const surfaceContext = { ...context, root: surfaceRoot };
+  const surfaceDraft = {
+    ...input,
+    findings: [],
+    complete: false,
+    coverage: {
+      completeness: "partial",
+      explicitExclusions: [],
+      surfaces: [
+        {
+          id: "pending-surface",
+          label: "Synthetic review",
+          disposition: "needs_follow_up",
+        },
+      ],
+      deferred: [
+        { reason: "Synthetic review pending", surfaceIds: ["pending-surface"] },
+      ],
+    },
+  };
+  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
+  await recordCodexSecurityScanDraft(surfaceContext, {
+    ...surfaceDraft,
+    complete: true,
+    coverage: {
+      ...surfaceDraft.coverage,
+      completeness: "complete",
+      deferred: [],
+      surfaces: [
+        { ...surfaceDraft.coverage.surfaces[0], disposition: "not_applicable" },
+      ],
+    },
+  });
+  await recordCodexSecurityScanDraft(surfaceContext, surfaceDraft);
+  assert.equal(
+    (await readJson(surfaceRoot, "coverage.json")).completeness,
+    "complete",
+  );
+  assert.deepEqual((await readJson(surfaceRoot, "coverage.json")).deferred, []);
+
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
     scanId,

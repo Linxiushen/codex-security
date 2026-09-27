@@ -135,6 +135,7 @@ import {
 import {
   prepareKnowledgeBase,
   type PreparedKnowledgeBase,
+  type KnowledgeBaseSnapshot,
 } from "./knowledge-base.js";
 import { FindingWorkflow, workflowDigest } from "./finding-workflow.js";
 import { createPermissionCheckedCodex } from "./permission-profile.js";
@@ -302,6 +303,8 @@ export interface ScanOptions extends ScanSettings {
   preserveProviderEnvironment?: boolean;
   /** @internal A complete ordinary pass owned by a Deep Scan. */
   deepScanPass?: boolean;
+  /** @internal Frozen inputs shared by ordinary passes of the same Deep Scan. */
+  knowledgeBaseSnapshot?: KnowledgeBaseSnapshot;
   /** @internal Persist composition membership after normal registration. */
   onRegisteredScan?: (registration: JsonObject) => Promise<void>;
   /** @internal A parent budget requires child usage tracking to succeed. */
@@ -712,15 +715,11 @@ export class CodexSecurity {
         ...(session.sessionConfig["features"] as JsonObject),
         plugins: false,
       };
-      const { codex } = this.#createSessionCodex(
-        session,
-        {
-          CODEX_SECURITY_REPOSITORY: inputs.repository,
-          CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
-          CODEX_SECURITY_SURFACE: this.#surface,
-        },
-        options.auth,
-      );
+      const { codex } = this.#createSessionCodex(session, {
+        CODEX_SECURITY_REPOSITORY: inputs.repository,
+        CODEX_SECURITY_PLUGIN_ROOT: runtime.plugin.pluginRoot,
+        CODEX_SECURITY_SURFACE: this.#surface,
+      });
       const thread = codex.startThread({
         threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
         workingDirectory: outputDir,
@@ -1038,7 +1037,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         policyCodexConfig(session.sessionConfig),
         inputs.gitMetadataPaths.length === 0
           ? []
@@ -1253,6 +1251,7 @@ export class CodexSecurity {
     let releaseCredentialHome: (() => Promise<void>) | null = null;
     let releaseExecution: (() => void) | undefined;
     let scanFailure = false;
+    let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
     let budgetRecovery: {
@@ -1283,6 +1282,7 @@ export class CodexSecurity {
         "prepare-scan-completion",
         "complete-scan",
         "fail-scan",
+        "cancel-scan",
         "preserve-scan-results",
         "update-progress",
         "complete-budget-exhausted-scan",
@@ -1341,9 +1341,9 @@ export class CodexSecurity {
           "temporary",
         );
       }
-      if (options.knowledgeBasePaths?.length) {
+      if (options.knowledgeBasePaths?.length || options.knowledgeBaseSnapshot) {
         knowledgeBase = await prepareKnowledgeBase(
-          options.knowledgeBasePaths,
+          options.knowledgeBaseSnapshot ?? options.knowledgeBasePaths!,
           signal,
         );
       }
@@ -1685,6 +1685,8 @@ export class CodexSecurity {
         deepScan: deepScanConfiguration?.settings,
         auth: options.auth,
       });
+      if (knowledgeBase !== null)
+        recipe["knowledgeBaseSha256"] = knowledgeBase.sha256;
       if (session.inheritedPermissions !== undefined) {
         const savedConfig = structuredClone(effectiveConfig);
         const profiles = savedConfig["profiles"];
@@ -1793,8 +1795,18 @@ export class CodexSecurity {
         options.registeredScan === undefined
           ? undefined
           : registration["threadId"];
+      const savedRecipe = registration["recipe"];
+      if (
+        (options.resumeScanId !== undefined ||
+          options.registeredScan !== undefined) &&
+        isRecord(savedRecipe) &&
+        typeof savedRecipe["knowledgeBaseSha256"] === "string" &&
+        savedRecipe["knowledgeBaseSha256"] !== recipe["knowledgeBaseSha256"]
+      )
+        throw new CodexSecurityError(
+          "The knowledge base changed since this scan started. Restore the original documents before resuming.",
+        );
       if (options.resumeScanId !== undefined) {
-        const savedRecipe = registration["recipe"];
         if (
           scanId !== options.resumeScanId ||
           !isRecord(savedRecipe) ||
@@ -1897,7 +1909,7 @@ export class CodexSecurity {
         );
       }
       const sealed = typeof registration["sealedProducerVersion"] === "string";
-      let sealedThreadId: string | undefined;
+      let sealedThreadId: string | null = null;
       if (sealed) {
         // Reconcile sealing before the ordinary completion transaction without rewriting artifacts.
         const saved = await workbench(workbenchOptions, [
@@ -1907,16 +1919,20 @@ export class CodexSecurity {
         ]);
         const savedScan = saved["scan"] as JsonObject;
         const checkpoint = saved["compositionCheckpoint"] as
-          | { legacy?: { cost?: ScanCost; originThreadId?: string } }
-          | null
-          | undefined;
+          Omit<DeepScanCheckpoint, "aggregate"> | null | undefined;
         resumeThreadId = savedScan["continuationThreadId"];
         // Legacy cost already includes this origin session; do not restart its tracker.
         sealedThreadId =
           typeof resumeThreadId === "string"
             ? resumeThreadId
-            : checkpoint?.legacy?.originThreadId;
-        if (typeof sealedThreadId !== "string")
+            : (checkpoint?.legacy?.originThreadId ?? null);
+        const emptyComposition =
+          mode === "deep" &&
+          checkpoint?.terminalReason === "capped" &&
+          checkpoint.mergedScanIds.length === 0 &&
+          Array.isArray(savedScan["findings"]) &&
+          savedScan["findings"].length === 0;
+        if (sealedThreadId === null && !emptyComposition)
           throw new CodexSecurityError(
             "The sealed scan has no saved execution session.",
           );
@@ -1937,7 +1953,7 @@ export class CodexSecurity {
           }
         }
         if (mode === "deep" && checkpoint == null) {
-          completionCost = await historicalCost(sealedThreadId);
+          completionCost = await historicalCost(sealedThreadId!);
         }
         completionCost ??=
           (savedScan["cost"] as unknown as ScanCost | undefined) ?? null;
@@ -2166,7 +2182,6 @@ export class CodexSecurity {
       const { codex, environment } = this.#createSessionCodex(
         session,
         runtimePaths,
-        options.auth,
         undefined,
         [],
         mode === "deep" || options.deepScanPass === true,
@@ -2403,7 +2418,7 @@ export class CodexSecurity {
                     ? null
                     : snapshot.usage,
               },
-              sealedThreadId!,
+              sealedThreadId,
               scanDir,
               runtime.plugin.installedRoot,
               expectation,
@@ -2464,6 +2479,7 @@ export class CodexSecurity {
                   preserveProviderEnvironment:
                     session.preserveProviderEnvironment,
                   knowledgeBasePaths: knowledgeBase?.sources,
+                  knowledgeBaseSnapshot: knowledgeBase?.snapshot,
                   scanPrompt: effectiveScanPrompt,
                   safetyIdentifier: options.safetyIdentifier,
                   requireCost: options.maxCostUsd !== undefined,
@@ -2610,11 +2626,7 @@ export class CodexSecurity {
                   : null,
               );
               const resultThreadId =
-                thread.id ?? checkpoint.legacy?.originThreadId;
-              if (resultThreadId === undefined)
-                throw new IncompleteScanError(
-                  "Deep Scan completed without its merge session.",
-                );
+                thread.id ?? checkpoint.legacy?.originThreadId ?? null;
               return await collectResult(
                 { status: "completed", model, usage },
                 resultThreadId,
@@ -2756,12 +2768,6 @@ export class CodexSecurity {
           });
           checkOpen();
         } catch (error) {
-          if (
-            signal.aborted ||
-            this.#closed ||
-            error instanceof ScanPermissionError
-          )
-            throw error;
           if (artifactRestorer !== null) {
             for (const artifact of completedArtifacts) {
               try {
@@ -2770,14 +2776,20 @@ export class CodexSecurity {
                   artifact.contents,
                 );
               } catch (cause) {
-                if (signal.aborted || this.#closed) throw cause;
-                throw new OutputDirectoryError(
+                artifactRestorationFailure = new OutputDirectoryError(
                   "Cannot restore an artifact outside the scan directory.",
                   { cause },
                 );
+                throw artifactRestorationFailure;
               }
             }
           }
+          if (
+            signal.aborted ||
+            this.#closed ||
+            error instanceof ScanPermissionError
+          )
+            throw error;
           await collectResult(
             result.turnResult,
             result.threadId,
@@ -2856,7 +2868,6 @@ export class CodexSecurity {
                 const { codex } = this.#createSessionCodex(
                   session,
                   runtimePaths,
-                  options.auth,
                   matcherConfig,
                   configOverrides,
                 );
@@ -2906,6 +2917,7 @@ export class CodexSecurity {
       )
         costAbortController.abort(error);
       const tracked = await costTracker?.stop().catch(() => null);
+      if (artifactRestorationFailure !== null) throw artifactRestorationFailure;
       const cost = combinedCost(tracked?.cost ?? mergeCost);
       const snapshot =
         cost === null
@@ -3009,12 +3021,21 @@ export class CodexSecurity {
         } catch {}
       }
       const transportClosed = signal.reason instanceof ScanTransportClosedError;
+      const canceled =
+        signal.aborted &&
+        (options.signal?.aborted === true ||
+          this.#abortController.signal.aborted) &&
+        isCancellationDerivedFailure(failure, signal);
+
       const preservedCost =
         options.mode === "deep"
           ? (completionCost ??
             (tracked?.cost ? completeCost(tracked.cost) : null))
           : snapshot?.cost;
-      if (activeScan !== null && (options.deepScanPass || transportClosed)) {
+      if (
+        activeScan !== null &&
+        (options.deepScanPass || transportClosed || canceled)
+      ) {
         await workbench({ ...activeScan.options, signal: undefined }, [
           "preserve-scan-results",
           "--scan-id",
@@ -3038,15 +3059,19 @@ export class CodexSecurity {
         }
         try {
           await workbench({ ...activeScan.options, signal: undefined }, [
-            "fail-scan",
+            canceled ? "cancel-scan" : "fail-scan",
             "--scan-id",
             activeScan.id,
-            // Scan history can be shared; never persist credential-bearing failures.
-            "--message",
-            safeErrorMessage(failure).slice(0, 2400),
-            ...(preservedCost
-              ? ["--cost-json", JSON.stringify(preservedCost)]
-              : []),
+            ...(canceled
+              ? []
+              : [
+                  // Scan history can be shared; never persist credential-bearing failures.
+                  "--message",
+                  safeErrorMessage(failure).slice(0, 2400),
+                  ...(preservedCost
+                    ? ["--cost-json", JSON.stringify(preservedCost)]
+                    : []),
+                ]),
           ]);
         } catch {}
       }
@@ -3334,7 +3359,6 @@ export class CodexSecurity {
   #createSessionCodex(
     session: PreparedSession,
     runtimePaths: Record<string, string>,
-    auth: ScanAuthMode = "auto",
     config?: JsonObject,
     configOverrides: string[] = [],
     requirePermissions = false,
@@ -3342,31 +3366,19 @@ export class CodexSecurity {
     const {
       runtime,
       python,
-      modelProvider,
       externalProvider,
       apiKey,
       sessionConfig,
+      scanEnvironment,
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(
-        python,
-        withoutCodexHome(
-          session.preserveProviderEnvironment
-            ? runtime.environment
-            : selectedScanEnvironment(
-                commandAuth
-                  ? withoutOpenAiApiKeys(runtime.environment)
-                  : runtime.environment,
-                auth,
-                modelProvider,
-              ),
-        ),
-      ),
+      ...pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
       ...(externalProvider === null
         ? {}
         : { [externalProvider.env_key]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
+      CODEX_SECURITY_STATE_DIR: codexSecurityStateDirectory(scanEnvironment),
       ...runtimePaths,
     };
     for (const name of Object.keys(environment)) {
@@ -3545,15 +3557,17 @@ export class CodexSecurity {
           `Set ${externalProvider.env_key} to run a scan through ${externalProvider.name}.`,
         );
       }
-      const scanEnvironment = options.preserveProviderEnvironment
-        ? this.#dependencies.environment
-        : selectedScanEnvironment(
-            commandAuth
-              ? withoutOpenAiApiKeys(this.#dependencies.environment)
-              : this.#dependencies.environment,
-            options.auth,
-            modelProvider,
-          );
+      const scanEnvironment = {
+        ...(options.preserveProviderEnvironment
+          ? this.#dependencies.environment
+          : selectedScanEnvironment(
+              commandAuth
+                ? withoutOpenAiApiKeys(this.#dependencies.environment)
+                : this.#dependencies.environment,
+              options.auth,
+              modelProvider,
+            )),
+      };
       if (this.#dependencies.prepareRuntime === undefined) {
         const credentialHome = await prepareCodexSecurityCredentialHome(
           scanEnvironment,
@@ -4063,12 +4077,18 @@ export class CodexSecurity {
       return result;
     } catch (error) {
       if (activeScan !== undefined) {
+        const canceled =
+          signal.aborted &&
+          (options.signal?.aborted === true ||
+            this.#abortController.signal.aborted) &&
+          isCancellationDerivedFailure(error, signal);
         await workbench({ ...activeScan.options, signal: undefined }, [
-          "fail-scan",
+          canceled ? "cancel-scan" : "fail-scan",
           "--scan-id",
           activeScan.id,
-          "--message",
-          safeErrorMessage(error).slice(0, 2400),
+          ...(canceled
+            ? []
+            : ["--message", safeErrorMessage(error).slice(0, 2400)]),
         ]).catch(() => undefined);
       }
       if (this.#closed) this.#requireOpen();
@@ -4961,7 +4981,7 @@ function scanCostUsage(
 
 async function collectResult(
   turnResult: TurnResultMetadata,
-  threadId: string,
+  threadId: string | null,
   scanDir: string,
   pluginRoot: string,
   expectation: ScanExpectation,
@@ -5469,6 +5489,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "model_reasoning_summary",
       "model_provider",
       "service_tier",
+      "cyber_access_program",
     ]) {
       const value = source[key];
       if (safeString(value)) result[key] = value;
@@ -5571,6 +5592,31 @@ function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
     ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
     : "Codex Security scan was interrupted during preparation.";
   throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
+}
+
+function isCancellationDerivedFailure(
+  failure: unknown,
+  signal: AbortSignal,
+): boolean {
+  let current = failure;
+  const seen = new Set<ScanInterruptedError>();
+  while (current instanceof ScanInterruptedError) {
+    if (current instanceof ScanCostLimitExceededError) return false;
+    if (current.cause === undefined) return true;
+    if (seen.has(current)) return false;
+    seen.add(current);
+    current = current.cause;
+  }
+  if (
+    current instanceof CodexSecurityError &&
+    current.message === "CodexSecurity is closed."
+  ) {
+    return true;
+  }
+  return (
+    current === signal.reason ||
+    (isRecord(current) && current["name"] === "AbortError")
+  );
 }
 
 function bundledCodexSdkEnvironment(
