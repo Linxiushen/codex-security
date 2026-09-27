@@ -70,7 +70,7 @@ const connectorDecision = {
 };
 for (const answer of [
   JSON.stringify(connectorDecision),
-  `Decision:\n\`\`\`json\n${JSON.stringify(connectorDecision, null, 2)}\n\`\`\``,
+  `Decision for /repos/{owner}/{repo}/code-scanning/alerts:\n\`\`\`json\n${JSON.stringify(connectorDecision, null, 2)}\n\`\`\``,
 ]) {
   const result = githubIntake(answer, connectorContext);
   assert.equal(result.pass, true, result.reason);
@@ -96,7 +96,7 @@ for (const fenced of [[true, true], [true, false], [false, true]]) {
       ? `\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``
       : JSON.stringify(decision))
     .join("\n");
-  assert.equal(githubIntake(conflictingDecisions, connectorContext).pass, false);
+  assert.equal(githubIntake(`Endpoint: /repos/{owner}/{repo}/code-scanning/alerts\n${conflictingDecisions}`, connectorContext).pass, false);
 }
 
 const intakeCases = fs.readFileSync(path.join(__dirname, "../tests/github-rest-intake.yaml"), "utf8");
