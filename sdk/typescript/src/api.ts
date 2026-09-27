@@ -1744,7 +1744,8 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...environmentWithGit(git.environment, git),
+          ...withoutCodexHome(environmentWithGit(git.environment, git)),
+          CODEX_HOME: runtime.codexHome,
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,

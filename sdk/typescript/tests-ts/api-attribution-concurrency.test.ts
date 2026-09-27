@@ -4,6 +4,7 @@ import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
 import { CodexSecurity } from "../src/index.js";
+import type { WorkbenchCommandOptions } from "../src/runtime.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { createApiTestFixtures } from "./support/api-events.js";
 
@@ -76,9 +77,10 @@ describe("delegated scan attribution", () => {
               }),
               repositoryRevision: async () => "deadbeef",
               runWorkbench: async (
-                _options: unknown,
+                options: WorkbenchCommandOptions,
                 args: readonly string[],
               ) => {
+                expect(options.environment["CODEX_HOME"]).toBe(credentialHome);
                 if (args[0] === "list-scans") return { scans: [] };
                 if (args[0] === "get-scan")
                   return { scan: { progress: { status: "running" } } };
