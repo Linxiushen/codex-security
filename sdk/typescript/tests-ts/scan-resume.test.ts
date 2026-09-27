@@ -21,6 +21,7 @@ import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import {
   DEEP_SCAN_CHECKPOINT,
   ScanCostTrackingError,
+  TerminalDeepScanError,
   type DeepScanCheckpoint,
 } from "../src/deep-scan.js";
 import {
@@ -522,6 +523,106 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   );
   await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
+
+test.each(["failed", "canceled"] as const)(
+  "rejecting a %s checkpoint preserves the saved child and merge cost total",
+  async (terminalReason) => {
+    const childCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 100_000,
+      output_tokens: 10_000,
+    })!;
+    const savedCost = estimateScanCost("gpt-5.6-sol", {
+      input_tokens: 101_000,
+      output_tokens: 10_100,
+    })!;
+    const f = await interruptedScan("deep", false, {}, false, true, {
+      cost: childCost,
+    });
+    await appendFile(
+      f.sessionPath,
+      JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 1_000, output_tokens: 100 },
+          },
+        },
+      }) + "\n",
+    );
+    const checkpoint = JSON.parse(
+      await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+    ) as DeepScanCheckpoint;
+    checkpoint.terminalReason = terminalReason;
+    await f.command(
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        f.scanId,
+        "--artifact-path",
+        DEEP_SCAN_CHECKPOINT,
+      ],
+      JSON.stringify(checkpoint),
+    );
+    // Transport interruption preserves the accumulated cost while the DB record
+    // remains running, even after the checkpoint has durably stopped discovery.
+    await f.command([
+      "preserve-scan-results",
+      "--scan-id",
+      f.scanId,
+      "--cost-json",
+      JSON.stringify(savedCost),
+    ]);
+    expect(
+      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+    ).toMatchObject({ progress: { status: "running" }, cost: savedCost });
+    const calls: string[][] = [];
+    let turns = 0;
+    const client = resumeClient(
+      f,
+      () => ({
+        startThread() {
+          throw new Error("A terminal scan must not start a worker.");
+        },
+        resumeThread(threadId) {
+          return {
+            id: threadId,
+            async runStreamed() {
+              turns += 1;
+              throw new Error(
+                "A terminal scan must not run another model turn.",
+              );
+            },
+          };
+        },
+      }),
+      async (options, args, input) => {
+        if (args[0] === "fail-scan") calls.push([...args]);
+        return await runWorkbench(options, args, input);
+      },
+    )({ codexOverrides: f.recipe.config });
+    try {
+      await expect(
+        client.run(f.repository, {
+          mode: "deep",
+          outputDir: f.scanDir,
+          resumeScanId: f.scanId,
+        }),
+      ).rejects.toBeInstanceOf(TerminalDeepScanError);
+      expect(turns).toBe(0);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).not.toContain("--cost-json");
+      expect(
+        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+      ).toMatchObject({ progress: { status: "failed" }, cost: savedCost });
+      expect(
+        (await f.command(["get-scan", "--scan-id", f.childId!]))["scan"],
+      ).toMatchObject({ progress: { status: "complete" }, cost: childCost });
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test.each([
   [false, false],

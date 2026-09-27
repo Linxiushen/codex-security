@@ -31,6 +31,9 @@ export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
 
+/** No composition accounting or execution is resumed for a terminal checkpoint. */
+export class TerminalDeepScanError extends ScanInterruptedError {}
+
 export interface DeepScanCheckpoint {
   version: 2;
   startedAt: string;
@@ -127,7 +130,7 @@ export async function runDeepScans(
   if (state.version !== 2)
     throw new Error("Unsupported saved Deep Scan checkpoint.");
   if (state.terminalReason === "failed" || state.terminalReason === "canceled")
-    throw new ScanInterruptedError(
+    throw new TerminalDeepScanError(
       `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
       scanDir,
     );

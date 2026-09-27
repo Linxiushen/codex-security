@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import {
   runDeepScans,
   ScanCostTrackingError,
+  TerminalDeepScanError,
   type DeepScanCheckpoint,
 } from "./deep-scan.js";
 import {
@@ -3045,10 +3046,14 @@ export class CodexSecurity {
         isCancellationDerivedFailure(failure, signal);
 
       const preservedCost =
-        options.mode === "deep"
-          ? (completionCost ??
-            (tracked?.cost ? completeCost(tracked.cost) : null))
-          : snapshot?.cost;
+        // A rejected terminal checkpoint never loaded its child/legacy costs.
+        // Leave the saved aggregate total intact when marking its record failed.
+        error instanceof TerminalDeepScanError
+          ? null
+          : options.mode === "deep"
+            ? (completionCost ??
+              (tracked?.cost ? completeCost(tracked.cost) : null))
+            : snapshot?.cost;
       if (
         activeScan !== null &&
         (options.deepScanPass || transportClosed || canceled)

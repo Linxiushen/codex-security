@@ -15,7 +15,10 @@ import * as timers from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
-import { ScanCostLimitExceededError } from "../src/errors.js";
+import {
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "../src/errors.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
@@ -392,9 +395,12 @@ describe("ordinary scan composition", () => {
         terminalReason,
       };
       await h.seed(checkpoint);
-      await expect(runDeepScans(h.input)).rejects.toThrow(
+      const execution = runDeepScans(h.input);
+      await expect(execution).rejects.toThrow(
         `saved Deep Scan is ${terminalReason}`,
       );
+      await expect(execution).rejects.toBeInstanceOf(ScanInterruptedError);
+      await expect(execution).rejects.toMatchObject({ scanDir: h.input.scanDir });
       expect(h.calls).toEqual([]);
       expect(h.mergeInputs).toEqual([]);
       expect(h.published).toEqual([]);
