@@ -563,8 +563,10 @@ test.each(
       accounting === "unknown-legacy";
     const separateLegacy = legacy && accounting !== "legacy-current";
     const recoveredCost = cost(
-      separateLegacy ? 103_000 : 101_000,
-      separateLegacy ? 10_300 : 10_100,
+      (separateLegacy ? 103_000 : 101_000) +
+        (accounting === "legacy-logs" ? 425 : 0),
+      (separateLegacy ? 10_300 : 10_100) +
+        (accounting === "legacy-logs" ? 42 : 0),
     );
     const savedCost =
       saved === "absent"
@@ -589,13 +591,21 @@ test.each(
       cwd: string,
       inputTokens: number,
       outputTokens: number,
+      parentThreadId?: string,
     ) => {
       await writeFile(
         path,
         [
           {
             type: "session_meta",
-            payload: { id, cwd, timestamp: "2026-01-01T00:00:00Z" },
+            payload: {
+              id,
+              cwd,
+              timestamp: "2026-01-01T00:00:00Z",
+              ...(parentThreadId === undefined
+                ? {}
+                : { parent_thread_id: parentThreadId }),
+            },
           },
           {
             type: "event_msg",
@@ -686,10 +696,33 @@ test.each(
         await writeUsage(
           join(f.codexHome, "sessions", `rollout-${legacyThreadId}.jsonl`),
           legacyThreadId,
-          join(f.scanDir, "artifacts"),
+          f.scanDir,
           2_000,
           200,
         );
+        const workerId = randomUUID();
+        // Legacy workers and reducers started independently. Their output
+        // directories identify them without admitting the newer pass or merge.
+        for (const [id, cwd, input, output, parent] of [
+          [
+            workerId,
+            join(f.scanDir, "artifacts/deep_discovery/workers/worker/output"),
+            250,
+            25,
+            undefined,
+          ],
+          [randomUUID(), join(f.scanDir, "artifacts"), 125, 12, undefined],
+          [randomUUID(), f.repository, 50, 5, workerId],
+        ] as const) {
+          await writeUsage(
+            join(f.codexHome, "sessions", `rollout-${id}.jsonl`),
+            id,
+            cwd,
+            input,
+            output,
+            parent,
+          );
+        }
       }
     }
     await f.command(

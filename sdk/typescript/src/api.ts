@@ -1973,7 +1973,7 @@ export class CodexSecurity {
         ) {
           const readHistoricalCost = async (
             threadId: string,
-            scanDirectory?: string,
+            scanDirectory: string,
           ) => {
             const historical = new ScanCostTracker({
               codexHome: runtime.codexHome,
@@ -1989,7 +1989,7 @@ export class CodexSecurity {
             scanDir,
             repository: repo,
             workbench: (args) => workbench(workbenchOptions, args),
-            historicalCost: readHistoricalCost,
+            historicalCost: (threadId) => readHistoricalCost(threadId, scanDir),
           });
           if (terminal !== null) {
             const { constituents } = terminal.accounting;
