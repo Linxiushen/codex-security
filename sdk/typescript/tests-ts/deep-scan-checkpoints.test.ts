@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 test.each([false, true])(
-  "concurrent checkpoint callers retain every registration and retry a failed shared write (failure=%s)",
+  "concurrent checkpoint callers retain every registration and retry a failed shared write (failure=%p)",
   async (failFirst) => {
     await mkdir(scratch, { recursive: true });
     const root = await mkdtemp(join(scratch, "checkpoint-reuse-"));

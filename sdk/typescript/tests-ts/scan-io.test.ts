@@ -177,7 +177,7 @@ test("session batches bound handles, reuse buffers, and retain discovery-order w
 });
 
 test.each([false, true])(
-  "session failure drains pending closes (directory=%s)",
+  "session failure drains pending closes (directory=%p)",
   async (directoryFailure) => {
     const home = await directory();
     const main = await session(home, "main");
@@ -288,7 +288,7 @@ test("report aliases preserve byte and overwrite order across batch boundaries",
 });
 
 test.each([false, true])(
-  "report failure drains writers and reports input-order error (cancel=%s)",
+  "report failure drains writers and reports input-order error (cancel=%p)",
   async (cancel) => {
     const input = await reports(
       Array.from({ length: 20 }, (_, i) => `item-${i}`),

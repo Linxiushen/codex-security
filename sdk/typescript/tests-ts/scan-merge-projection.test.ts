@@ -240,7 +240,7 @@ test("cancellation drains active copies and does not read waiting payloads", asy
 });
 
 test.each([false, true])(
-  "evidence aliases across directories wait for predecessors (failure=%s)",
+  "evidence aliases across directories wait for predecessors (failure=%p)",
   async (fail) => {
     const { input } = await fixture([report], []);
     const directory = "findings/issue";
