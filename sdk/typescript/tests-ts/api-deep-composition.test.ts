@@ -107,6 +107,21 @@ afterEach(async () => {
 test.each([
   { workers: 1, budget: false, emptyDeadline: true },
   { workers: 1, budget: false, emptyDeadline: true, measuredChild: true },
+  {
+    workers: 1,
+    budget: false,
+    emptyDeadline: true,
+    measuredChild: true,
+    lostCompletion: true,
+  },
+  {
+    workers: 1,
+    budget: false,
+    emptyDeadline: true,
+    measuredChild: true,
+    lostCompletion: true,
+    usage: "missing-child",
+  },
   { workers: 1, budget: false, emptyDeadline: true, lostCompletion: true },
   { workers: 1, budget: false, knowledge: true },
   { workers: 1, budget: false, provider: undefined },
@@ -478,6 +493,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
             };
           },
           runWorkbench: async (options, args, input) => {
+            // Model a process exit after sealing: its catch block cannot persist parent cost.
+            if (
+              measuredChild &&
+              lostCompletion &&
+              interrupted &&
+              args[0] === "preserve-scan-results" &&
+              registrations.get(args[args.indexOf("--scan-id") + 1]!)?.[
+                "mode"
+              ] === "deep"
+            )
+              return {};
             if (
               artifactFailure === "checkpoint" &&
               args[0] === "save-scan-artifact"
@@ -541,13 +567,17 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                   childId,
                   "--message",
                   "Discovery deadline reached.",
-                  "--cost-json",
-                  JSON.stringify(
-                    estimateScanCost("gpt-6-astra", {
-                      input_tokens: 100,
-                      output_tokens: 20,
-                    }),
-                  ),
+                  ...(usage === "missing-child"
+                    ? []
+                    : [
+                        "--cost-json",
+                        JSON.stringify(
+                          estimateScanCost("gpt-6-astra", {
+                            input_tokens: 100,
+                            output_tokens: 20,
+                          }),
+                        ),
+                      ]),
                 ]);
                 await runWorkbench(
                   options,
@@ -1108,6 +1138,14 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
           controller = new AbortController();
           scanOptions.resumeScanId = [...registrations.keys()][0]!;
+          if (measuredChild) {
+            const saved = await runWorkbench(commandOptions, [
+              "get-scan",
+              "--scan-id",
+              scanOptions.resumeScanId,
+            ]);
+            expect((saved["scan"] as JsonObject)["cost"]).toBeUndefined();
+          }
         }
         const result = await run();
         expect(result.threadId).toBeNull();
@@ -1116,7 +1154,7 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         expect(turns).toEqual([]);
         expect(mergeAttempts).toBe(0);
         expect(registrations.size).toBe(measuredChild ? 2 : 1);
-        if (measuredChild) {
+        if (measuredChild && usage !== "missing-child") {
           const expectedCost = estimateScanCost("gpt-6-astra", {
             input_tokens: 100,
             output_tokens: 20,
@@ -1133,6 +1171,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           expect(result.turnResult).toMatchObject({
             usage: { input_tokens: 100, output_tokens: 20 },
           });
+        } else if (measuredChild) {
+          expect(result.cost).toBeNull();
+          expect(result.turnResult.usage).toBeNull();
         }
         const manifest = await readFile(join(scanDir, "scan-manifest.json"));
         scanOptions.resumeScanId = result.manifest.scan.id;

@@ -1956,7 +1956,10 @@ export class CodexSecurity {
         }
         completionCost ??=
           (savedScan["cost"] as unknown as ScanCost | undefined) ?? null;
-        if (typeof resumeThreadId !== "string" && checkpoint?.legacy?.cost)
+        if (
+          typeof resumeThreadId !== "string" &&
+          (emptyComposition || checkpoint?.legacy?.cost)
+        )
           completionCost ??= completeCost(null);
         if (
           completionCost === null &&

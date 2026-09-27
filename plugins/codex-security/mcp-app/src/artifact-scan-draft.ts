@@ -371,6 +371,8 @@ async function preserveScanDraft(
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
           !(
             typeof item.candidateId !== "string" &&
+            item.candidate === undefined &&
+            item.finding === undefined &&
             Array.isArray(item.surfaceIds) &&
             item.surfaceIds.length > 0 &&
             item.surfaceIds.every(
