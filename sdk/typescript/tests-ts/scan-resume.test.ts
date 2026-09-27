@@ -87,7 +87,7 @@ async function interruptedScan(
           tasks: [task],
           ...(settings.knowledgeBasePaths?.length
             ? {
-                knowledgeBaseDigest: workflowDigest({
+                knowledgeBaseDigests: {
                   [mode]: workflowDigest(
                     (
                       await readKnowledgeBaseSnapshot(
@@ -95,7 +95,7 @@ async function interruptedScan(
                       )
                     ).documents,
                   ),
-                }),
+                },
               }
             : {}),
         },
