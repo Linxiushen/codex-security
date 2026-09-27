@@ -4,6 +4,7 @@ import {
   compositionCheckpointFromWorkbench,
   decodeDeepScanCheckpoint,
   serializeDeepScanCheckpoint,
+  type DeepScanCheckpointSummary,
 } from "../src/deep-scan-checkpoint.js";
 
 test.each(["current", "legacy"])(
@@ -20,9 +21,6 @@ test.each(["current", "legacy"])(
     );
     const before = JSON.stringify(document);
     const checkpoint = decodeDeepScanCheckpoint(document);
-    expect(
-      compositionCheckpointFromWorkbench({ compositionCheckpoint: document }),
-    ).toBe(checkpoint);
     expect(serializeDeepScanCheckpoint(checkpoint)).toBe(before);
     expect(JSON.stringify(document)).toBe(before);
     if (name === "current") {
@@ -47,6 +45,39 @@ test.each(["current", "legacy"])(
       expect(checkpoint.legacy!.originThreadId).toBeNull();
       expect(Object.hasOwn(checkpoint.legacy!, "cost")).toBe(false);
       expect(checkpoint.terminalReason).toBe("capped");
+    }
+  },
+);
+
+test.each(["current", "legacy"])(
+  "reads the %s get-scan summary without claiming its omitted payloads",
+  async (name) => {
+    const checkpoint = decodeDeepScanCheckpoint(
+      JSON.parse(
+        await readFile(
+          new URL(
+            `../../../plugins/codex-security/tests/fixtures/composition-checkpoints/${name}.json`,
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ),
+    );
+    const { aggregate: _aggregate, legacy, ...metadata } = checkpoint;
+    const document: DeepScanCheckpointSummary = metadata;
+    if (legacy) {
+      const { coverage: _coverage, ...legacyMetadata } = legacy;
+      document.legacy = legacyMetadata;
+    }
+    const summary = compositionCheckpointFromWorkbench({
+      compositionCheckpoint: document,
+    })!;
+    expect(summary).toBe(document);
+    expect(summary.version).toBe(2);
+    expect(Object.hasOwn(summary, "aggregate")).toBe(false);
+    if (legacy) {
+      expect(summary.legacy!.originThreadId).toBeNull();
+      expect(Object.hasOwn(summary.legacy!, "coverage")).toBe(false);
     }
   },
 );
