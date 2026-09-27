@@ -1058,6 +1058,13 @@ def apply_migrations(
                         "publication_error_message",
                         "TEXT",
                     )
+                elif version == 43:
+                    add_column_if_missing(
+                        connection,
+                        "deep_scan_runs",
+                        "discovery_user_context_json",
+                        "TEXT",
+                    )
                 continue
             if version == 6:
                 repair_thread_scoped_workspaces_migration(connection)
