@@ -1163,7 +1163,7 @@ def merge_saved_results(
                     }
                 )
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions", "reviews"):
-            if project_coverage and field == "reviews":
+            if worker_id is not None and field == "reviews":
                 continue
             items = draft["coverage"].get(field, [])
             if not isinstance(items, list) or (field == "reviews" and not items):

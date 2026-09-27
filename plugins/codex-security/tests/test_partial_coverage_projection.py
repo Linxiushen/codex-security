@@ -180,6 +180,98 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
     assert checkpoint.read_bytes() == original
 
 
+@pytest.mark.parametrize("failed_first", [False, True])
+def test_failed_worker_reviews_do_not_replace_accepted_reviews(
+    workbench_api, workbench_db, publication_scan, failed_first
+):
+    scan = publication_scan()
+    # These fixture rows share created_at; recovery reads them in worker-ID order.
+    first, second = sorted([add_worker(workbench_db, scan), add_worker(workbench_db, scan)])
+    failed, accepted = (first, second) if failed_first else (second, first)
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET status = 'failed', merge_state = 'none' WHERE id = ?",
+            (failed.parent.name,),
+        )
+    review = {"workerId": accepted.parent.name, "attempt": 1, "completeness": "partial"}
+    originals = {}
+    drafts = {}
+    for label, result in (("accepted", accepted), ("failed", failed)):
+        coverage = {
+            **scan.coverage,
+            "completeness": "partial",
+            "surfaces": [
+                {
+                    "id": f"{label}-surface",
+                    "label": f"{label} source review",
+                    "disposition": "needs_follow_up",
+                    "receiptRefs": [],
+                }
+            ],
+            "deferred": [
+                {
+                    "id": f"{label}-gap",
+                    "reason": f"{label} source needs proof.",
+                    "surfaceIds": [f"{label}-surface"],
+                }
+            ],
+            "explicitExclusions": [
+                {
+                    "id": f"{label}-exclusion",
+                    "pattern": "vendor/",
+                    "reason": f"{label} source excludes external dependencies.",
+                }
+            ],
+            "openQuestions": [{"question": f"Which controls apply to the {label} source?"}],
+        }
+        if result == failed:
+            coverage["reviews"] = [{**review, "completeness": "complete"}]
+        draft = {
+            "scanId": scan.scan_id,
+            "complete": result == accepted,
+            "findings": [],
+            "coverage": coverage,
+        }
+        result.write_text(json.dumps(draft))
+        checkpoint = write_checkpoint(result.parent / "checkpoints", draft)
+        originals.update({path: path.read_bytes() for path in (result, checkpoint)})
+        drafts[label] = draft
+    for name in ("scan-manifest.json", "findings.json", "coverage.json"):
+        (scan.scan_dir / name).unlink()
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    coverage_path = scan.scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    assert coverage["reviews"] == [review]
+    for field in ("surfaces", "deferred", "explicitExclusions", "openQuestions"):
+        assert all(item in coverage[field] for item in drafts["failed"]["coverage"][field])
+    assert any(
+        item.get("reason") == "accepted source needs proof." for item in coverage["deferred"]
+    )
+    published = coverage_path.read_bytes()
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert coverage_path.read_bytes() == published
+    late = write_checkpoint(
+        accepted.parent / "checkpoints",
+        {
+            **drafts["accepted"],
+            "complete": False,
+            "coverage": {**scan.coverage, "openQuestions": ["Late worker checkpoint."]},
+        },
+    )
+    originals[late] = late.read_bytes()
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    assert coverage_path.read_bytes() == published
+    manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
+    assert late.relative_to(scan.scan_dir).as_posix() in manifest["scan"]["preservedSources"]
+    assert all(path.read_bytes() == original for path, original in originals.items())
+
+
 @pytest.mark.parametrize("worker_count", [1, 2])
 @pytest.mark.parametrize("missing_parent_surfaces", [False, True])
 @pytest.mark.parametrize("retained_deferred", [False, True])
