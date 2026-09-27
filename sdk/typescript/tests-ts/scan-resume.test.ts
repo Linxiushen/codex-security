@@ -236,6 +236,7 @@ async function interruptedScan(
           mode: "standard",
           config: recipe.config,
         },
+        parentScanRole: "deep_pass",
       }),
     );
     childId = child["scanId"] as string;
