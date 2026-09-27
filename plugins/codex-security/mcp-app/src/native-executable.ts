@@ -198,7 +198,7 @@ function* resolveWindowsDirectFromSearchPath(
 ): Generator<string> {
   for (const directory of searchPath?.split(delimiter) ?? []) {
     const candidate = join(
-      absoluteSearchDirectory(directory, originalCwd),
+      absoluteWindowsSearchDirectory(directory, originalCwd),
       executableName,
     );
     if (!isWindowsAppsPath(candidate) && existsSync(candidate)) yield candidate;
@@ -211,7 +211,10 @@ function* resolveWindowsCodexFromSearchPath(
   originalCwd: string,
 ): Generator<string> {
   for (const directory of searchPath?.split(delimiter) ?? []) {
-    const absoluteDirectory = absoluteSearchDirectory(directory, originalCwd);
+    const absoluteDirectory = absoluteWindowsSearchDirectory(
+      directory,
+      originalCwd,
+    );
     const directBinary = join(absoluteDirectory, "codex.exe");
     if (!isWindowsAppsPath(directBinary) && existsSync(directBinary))
       yield directBinary;
@@ -285,6 +288,16 @@ function absoluteSearchDirectory(
   originalCwd: string,
 ): string {
   return resolve(originalCwd, directory || ".");
+}
+
+function absoluteWindowsSearchDirectory(
+  directory: string,
+  originalCwd: string,
+): string {
+  if (directory.startsWith('"') && directory.endsWith('"')) {
+    directory = directory.slice(1, -1);
+  }
+  return absoluteSearchDirectory(directory, originalCwd);
 }
 
 function absoluteCodexPath(

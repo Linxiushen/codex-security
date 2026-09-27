@@ -371,7 +371,7 @@ async function testWindowsLauncherSkipsExtensionlessNpmShim() {
 
 async function testWindowsNpmPackageResolution(installation = "global") {
   const root = await mkdtemp(
-    path.join(tmpdir(), "codex-security-windows-npm-"),
+    path.join(tmpdir(), "codex-security windows-npm-"),
   );
   temporaryRoots.push(root);
   const architecture = process.arch === "arm64" ? "arm64" : "x64";
@@ -446,31 +446,31 @@ async function testWindowsNpmPackageResolution(installation = "global") {
     await copyFile(process.execPath, path.join(repositoryBin, "codex.exe"));
     await symlink(repositoryBin, alias, "junction");
     for (const configured of [undefined, "codex", "codex.exe"]) {
-      const search = windowsLauncherEnvironment(
-        repositoryBin,
-        alias,
-        shimDirectory,
-      );
-      if (configured !== undefined) search.CODEX_CLI_PATH = configured;
-      const trusted = await resolveTrustedCodex(
-        search,
-        repository,
-        "win32",
-        architecture,
-      );
-      assert.ok(
-        trusted,
-        "a later trusted npm installation must remain discoverable",
-      );
-      assert.equal(
-        await realpath(trusted.executable),
-        await realpath(nativeBinary),
-      );
-      assert.equal(trusted.environment.PATH, await realpath(shimDirectory));
-      assert.equal(
-        search.Path,
-        [repositoryBin, alias, shimDirectory].join(path.delimiter),
-      );
+      for (const quoted of [false, true]) {
+        const directories = [repositoryBin, alias, shimDirectory].map(
+          (directory) => (quoted ? `"${directory}"` : directory),
+        );
+        const search = windowsLauncherEnvironment(...directories);
+        if (configured !== undefined) search.CODEX_CLI_PATH = configured;
+        const trusted = await resolveTrustedCodex(
+          search,
+          repository,
+          "win32",
+          architecture,
+        );
+        assert.ok(
+          trusted,
+          "a later trusted npm installation must remain discoverable",
+        );
+        assert.equal(
+          await realpath(trusted.executable),
+          await realpath(nativeBinary),
+        );
+        if (!quoted || process.platform === "win32") {
+          assert.equal(trusted.environment.PATH, await realpath(shimDirectory));
+        }
+        assert.equal(search.Path, directories.join(path.delimiter));
+      }
     }
     const explicit = windowsLauncherEnvironment(repositoryBin, shimDirectory);
     explicit.CODEX_CLI_PATH = path.join(repositoryBin, "codex.exe");

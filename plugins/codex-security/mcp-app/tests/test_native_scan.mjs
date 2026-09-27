@@ -152,7 +152,7 @@ test("native preparation requires an external executable for fresh and resumed c
     bin,
     process.platform === "win32" ? "codex.exe" : "codex",
   );
-  const externalBin = join(root, "external-bin");
+  const externalBin = join(root, "external bin");
   const externalExecutable = join(
     externalBin,
     process.platform === "win32" ? "codex.exe" : "codex",
@@ -181,7 +181,7 @@ test("native preparation requires an external executable for fresh and resumed c
       { bin: externalBin, executable: externalExecutable },
     ];
     if (process.platform === "win32") {
-      const npmBin = join(root, "npm");
+      const npmBin = join(root, "global npm");
       const codexPackage = join(npmBin, "node_modules", "@openai", "codex");
       const architecture = process.arch === "arm64" ? "arm64" : "x64";
       const platformPackage = join(
@@ -245,21 +245,27 @@ test("native preparation requires an external executable for fresh and resumed c
       );
 
       for (const installation of installations) {
-        process.env.PATH = [bin, alias, installation.bin].join(delimiter);
-        process.env.CODEX_CLI_PATH = executable;
-        await assert.rejects(
-          prepareNativeScan(request),
-          /outside the scan target/,
-        );
-        for (const configured of [undefined, "  ", "codex"]) {
-          if (configured === undefined) delete process.env.CODEX_CLI_PATH;
-          else process.env.CODEX_CLI_PATH = configured;
-          const originalPath = process.env.PATH;
-          const prepared = await prepareNativeScan(request);
-          const environment = prepared.client.dependencies.environment;
-          assert.equal(environment.CODEX_CLI_PATH, installation.executable);
-          assert.equal(environment.PATH, installation.bin);
-          assert.equal(process.env.PATH, originalPath);
+        for (const quoted of process.platform === "win32"
+          ? [false, true]
+          : [false]) {
+          process.env.PATH = [bin, alias, installation.bin]
+            .map((directory) => (quoted ? `"${directory}"` : directory))
+            .join(delimiter);
+          process.env.CODEX_CLI_PATH = executable;
+          await assert.rejects(
+            prepareNativeScan(request),
+            /outside the scan target/,
+          );
+          for (const configured of [undefined, "  ", "codex"]) {
+            if (configured === undefined) delete process.env.CODEX_CLI_PATH;
+            else process.env.CODEX_CLI_PATH = configured;
+            const originalPath = process.env.PATH;
+            const prepared = await prepareNativeScan(request);
+            const environment = prepared.client.dependencies.environment;
+            assert.equal(environment.CODEX_CLI_PATH, installation.executable);
+            assert.equal(environment.PATH, installation.bin);
+            assert.equal(process.env.PATH, originalPath);
+          }
         }
       }
 
