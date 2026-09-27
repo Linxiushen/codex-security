@@ -23,4 +23,5 @@ This file is the source of truth for portable deterministic, no-model Codex Secu
 
 ## Not Applicable
 
+- **Model-backed evaluation execution:** deterministic dataset, generator, hydration, and scorer tests belong in Layer 1, but model-backed evaluation execution remains outside Layer 1.
 - **Model prompt compilation:** current skill and agent prompts have no runtime placeholder expansion. Structural metadata and non-empty prompt checks are sufficient until parameterized prompt templates are introduced.
