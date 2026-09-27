@@ -57,7 +57,7 @@ export async function readKnowledgeBaseSnapshot(
 
     const source = await realpath(path);
     const selected = metadata.isDirectory()
-      ? await discover(source, signal)
+      ? (await discover(source, signal)).sort()
       : [source];
     if (selected.length === 0) {
       throw new Error(

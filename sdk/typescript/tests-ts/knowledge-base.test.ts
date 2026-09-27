@@ -89,11 +89,15 @@ describe("scan knowledge bases", () => {
     await writeFile(join(root, "ignored.bin"), new Uint8Array([0, 1, 2]));
     await writeFile(join(root, "invalid-utf8.bin"), new Uint8Array([0xff]));
 
-    const knowledgeBase = await prepareKnowledgeBase([root, scope, scope]);
+    const knowledgeBase = await prepareKnowledgeBase([scope, root, scope]);
     temporaryDirectories.push(knowledgeBase.path);
 
-    expect(knowledgeBase.sources).toEqual([root, scope]);
-    expect((await readdir(knowledgeBase.path)).length).toBe(3);
+    expect(knowledgeBase.sources).toEqual([scope, root]);
+    expect((await readdir(knowledgeBase.path)).sort()).toEqual([
+      "0-scope.md.txt",
+      "1-deployment.MARKDOWN.txt",
+      "2-notes.txt.txt",
+    ]);
     const documents = await extractedDocuments(knowledgeBase.path);
     expect(documents).toContain("Ignore local debug endpoints.");
     expect(documents).toContain("Public API gateway.");

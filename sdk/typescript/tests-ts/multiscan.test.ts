@@ -2056,9 +2056,14 @@ describe("multiscan", () => {
         `id,repository,revision\nknowledge,${source.path},${source.revision}\n`,
       );
       const knowledge = join(paths.root, "knowledge-base");
-      await mkdir(knowledge);
+      const nested = join(knowledge, "nested");
+      await mkdir(nested, { recursive: true });
       const document = join(knowledge, "architecture.md");
+      const deployment = join(nested, "deployment.md");
+      const priorities = join(nested, "priorities.md");
       await writeFile(document, "Original context.");
+      await writeFile(deployment, "Deployment context.");
+      await writeFile(priorities, "Review priorities.");
       let calls = 0;
       const security = client(async (_repository, scanOptions = {}) => {
         calls++;
@@ -2074,10 +2079,41 @@ describe("multiscan", () => {
               : { knowledgeBasePaths },
           ),
         );
-      await run([knowledge]);
+      let reverseListing = false;
+      const originalReaddir = filesystem.readdir;
+      const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
+        async (...args) => {
+          const entries = await Reflect.apply(
+            originalReaddir,
+            filesystem,
+            args,
+          );
+          if (args[0] === knowledge || args[0] === nested) {
+            entries.sort((left: { name: string }, right: { name: string }) =>
+              left.name.localeCompare(right.name),
+            );
+            if (reverseListing) entries.reverse();
+          }
+          return entries;
+        },
+      );
+      try {
+        await run([knowledge]);
+        reverseListing = true;
+        expect(await run([knowledge])).toMatchObject({ skipped: 1 });
+      } finally {
+        listingSpy.mockRestore();
+      }
       expect(
-        await run(perMode ? [knowledge] : [document, document]),
+        await run(
+          perMode ? [knowledge] : [document, deployment, priorities, document],
+        ),
       ).toMatchObject({ skipped: 1 });
+      if (!perMode) {
+        await expect(run([deployment, document, priorities])).rejects.toThrow(
+          "manifest does not match",
+        );
+      }
       await writeFile(document, "Revised context.");
       await expect(run([knowledge])).rejects.toThrow("manifest does not match");
       await writeFile(document, "Original context.");
@@ -2085,6 +2121,7 @@ describe("multiscan", () => {
       await writeFile(additional, "Additional context.");
       await expect(run([knowledge])).rejects.toThrow("manifest does not match");
       await rm(additional);
+      expect(await run([knowledge])).toMatchObject({ skipped: 1 });
       const manifestPath = join(paths.output, "manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       delete manifest.knowledgeBaseDigest;
