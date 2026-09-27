@@ -125,11 +125,20 @@ export async function prepareNativeScan(
 ): Promise<PreparedNativeScan> {
   const inheritedEnvironment = await snapshotNativeEnvironment();
   const codexPath = resolveCodexPath(inheritedEnvironment);
-  const codex = await resolveTrustedExecutable(
+  let codex = await resolveTrustedExecutable(
     codexPath,
     inheritedEnvironment,
     input.scan.targetPath,
   );
+  if (codex === null && !inheritedEnvironment.CODEX_CLI_PATH?.trim()) {
+    // An automatic PATH match may be inside the target. Continue searching
+    // trusted entries without substituting for an explicitly selected path.
+    codex = await resolveTrustedExecutable(
+      "codex",
+      inheritedEnvironment,
+      input.scan.targetPath,
+    );
+  }
   if (codex === null) {
     throw new CodexSecurityError(
       `Could not resolve a Codex executable outside the scan target: ${codexPath}`,

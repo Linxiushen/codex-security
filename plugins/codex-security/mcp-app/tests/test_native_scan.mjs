@@ -152,6 +152,11 @@ test("native preparation requires an external executable for fresh and resumed c
     bin,
     process.platform === "win32" ? "codex.exe" : "codex",
   );
+  const externalBin = join(root, "external-bin");
+  const externalExecutable = join(
+    externalBin,
+    process.platform === "win32" ? "codex.exe" : "codex",
+  );
   const keys = [
     ...new Set([
       "CODEX_HOME",
@@ -169,6 +174,9 @@ test("native preparation requires an external executable for fresh and resumed c
     await mkdir(bin, { recursive: true });
     await writeFile(executable, "inert executable fixture");
     await chmod(executable, 0o700);
+    await mkdir(externalBin);
+    await writeFile(externalExecutable, "inert executable fixture");
+    await chmod(externalExecutable, 0o700);
     await symlink(
       bin,
       alias,
@@ -199,6 +207,22 @@ test("native preparation requires an external executable for fresh and resumed c
         prepareNativeScan(request),
         /outside the scan target/,
       );
+
+      process.env.PATH = [bin, alias, externalBin].join(delimiter);
+      await assert.rejects(
+        prepareNativeScan(request),
+        /outside the scan target/,
+      );
+      for (const configured of [undefined, "  "]) {
+        if (configured === undefined) delete process.env.CODEX_CLI_PATH;
+        else process.env.CODEX_CLI_PATH = configured;
+        const originalPath = process.env.PATH;
+        const prepared = await prepareNativeScan(request);
+        const environment = prepared.client.dependencies.environment;
+        assert.equal(environment.CODEX_CLI_PATH, externalExecutable);
+        assert.equal(environment.PATH, externalBin);
+        assert.equal(process.env.PATH, originalPath);
+      }
 
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.PATH = [bin, alias, dirname(process.execPath)].join(
