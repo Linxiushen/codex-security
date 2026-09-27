@@ -34,11 +34,11 @@ import {
 } from "../../../../sdk/typescript/src/runtime.js";
 import {
   resolveCodexPath,
+  resolveTrustedCodex,
   snapshotNativeEnvironment,
 } from "./native-executable.js";
 import type { NativeParentSandbox } from "./native-permissions.js";
 import { createPermissionCheckedCodex } from "../../../../sdk/typescript/src/permission-profile.js";
-import { resolveTrustedExecutable } from "../../../../sdk/typescript/src/trusted-executable.js";
 import type { ScanResults } from "./types.js";
 
 export interface NativeScanInput {
@@ -124,24 +124,13 @@ export async function prepareNativeScan(
   signal?: AbortSignal,
 ): Promise<PreparedNativeScan> {
   const inheritedEnvironment = await snapshotNativeEnvironment();
-  const codexPath = resolveCodexPath(inheritedEnvironment);
-  let codex = await resolveTrustedExecutable(
-    codexPath,
+  const codex = await resolveTrustedCodex(
     inheritedEnvironment,
     input.scan.targetPath,
   );
-  if (codex === null && !inheritedEnvironment.CODEX_CLI_PATH?.trim()) {
-    // An automatic PATH match may be inside the target. Continue searching
-    // trusted entries without substituting for an explicitly selected path.
-    codex = await resolveTrustedExecutable(
-      "codex",
-      inheritedEnvironment,
-      input.scan.targetPath,
-    );
-  }
   if (codex === null) {
     throw new CodexSecurityError(
-      `Could not resolve a Codex executable outside the scan target: ${codexPath}`,
+      `Could not resolve a Codex executable outside the scan target: ${resolveCodexPath(inheritedEnvironment)}`,
     );
   }
   const environment: NodeJS.ProcessEnv = {

@@ -24,9 +24,10 @@ const bundle = await build({
   platform: "node",
   write: false,
 });
-const { resolveCodexPath, snapshotNativeEnvironment } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
-);
+const { resolveCodexPath, resolveTrustedCodex, snapshotNativeEnvironment } =
+  await import(
+    `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].contents).toString("base64")}`
+  );
 const temporaryRoots = [];
 try {
   await testWindowsAppsCodexFallsBackToRelocatedBinary();
@@ -425,6 +426,59 @@ async function testWindowsNpmPackageResolution(installation = "global") {
     await realpath(resolveCodexPath(environment, "win32", architecture)),
     await realpath(nativeBinary),
   );
+  const repository = path.join(root, "repository");
+  await mkdir(repository);
+  const selected = await resolveTrustedCodex(
+    environment,
+    repository,
+    "win32",
+    architecture,
+  );
+  assert.ok(selected);
+  assert.equal(
+    await realpath(selected.executable),
+    await realpath(nativeBinary),
+  );
+  if (installation === "global") {
+    const repositoryBin = path.join(repository, "bin");
+    const alias = path.join(root, "repository-bin-alias");
+    await mkdir(repositoryBin, { recursive: true });
+    await copyFile(process.execPath, path.join(repositoryBin, "codex.exe"));
+    await symlink(repositoryBin, alias, "junction");
+    for (const configured of [undefined, "codex", "codex.exe"]) {
+      const search = windowsLauncherEnvironment(
+        repositoryBin,
+        alias,
+        shimDirectory,
+      );
+      if (configured !== undefined) search.CODEX_CLI_PATH = configured;
+      const trusted = await resolveTrustedCodex(
+        search,
+        repository,
+        "win32",
+        architecture,
+      );
+      assert.ok(
+        trusted,
+        "a later trusted npm installation must remain discoverable",
+      );
+      assert.equal(
+        await realpath(trusted.executable),
+        await realpath(nativeBinary),
+      );
+      assert.equal(trusted.environment.PATH, await realpath(shimDirectory));
+      assert.equal(
+        search.Path,
+        [repositoryBin, alias, shimDirectory].join(path.delimiter),
+      );
+    }
+    const explicit = windowsLauncherEnvironment(repositoryBin, shimDirectory);
+    explicit.CODEX_CLI_PATH = path.join(repositoryBin, "codex.exe");
+    assert.equal(
+      await resolveTrustedCodex(explicit, repository, "win32", architecture),
+      null,
+    );
+  }
   if (installation === "managed") {
     const mixedCaseEnvironment = {
       ...environment,
