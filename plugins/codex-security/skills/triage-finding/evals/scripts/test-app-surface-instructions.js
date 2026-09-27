@@ -63,6 +63,7 @@ const connectorDecision = {
   transport: "github_connector",
   access: "read_only",
   unavailable_endpoint: "explain_limitation",
+  rest_fallback: "only_if_endpoint_unavailable",
   rest_approval: "before_use",
   rest_account: "specified_account",
   rest_repository: "promptfoo/promptfoo",
@@ -78,6 +79,8 @@ for (const wrongDecision of [
   { transport: "rest" },
   { access: "read_write" },
   { unavailable_endpoint: "ignore" },
+  { rest_fallback: "always_after_approval" },
+  { rest_fallback: undefined },
   { rest_approval: "not_required" },
   { rest_approval: "after_use" },
   { rest_account: "any_available_account" },
@@ -87,3 +90,15 @@ for (const wrongDecision of [
   assert.equal(githubIntake(answer, connectorContext).pass, false, answer);
 }
 assert.equal(githubIntake("{invalid JSON}", connectorContext).pass, false);
+for (const fenced of [[true, true], [true, false], [false, true]]) {
+  const conflictingDecisions = [connectorDecision, { ...connectorDecision, transport: "rest" }]
+    .map((decision, index) => fenced[index]
+      ? `\`\`\`json\n${JSON.stringify(decision)}\n\`\`\``
+      : JSON.stringify(decision))
+    .join("\n");
+  assert.equal(githubIntake(conflictingDecisions, connectorContext).pass, false);
+}
+
+const intakeCases = fs.readFileSync(path.join(__dirname, "../tests/github-rest-intake.yaml"), "utf8");
+const connectorCase = intakeCases.match(/case_id: github-explicit-connector[\s\S]*?(?=\n- description:|$)/)[0];
+assert.match(connectorCase, /finding_input:.*code scanning/i);

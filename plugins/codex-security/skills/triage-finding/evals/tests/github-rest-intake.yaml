@@ -113,8 +113,8 @@
     case_id: github-explicit-connector
     target_repo: https://github.com/promptfoo/promptfoo
     source_type_under_test: github_repo
-    finding_input: "User explicitly requested using the GitHub Connector."
-    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for GitHub repo promptfoo/promptfoo."
+    finding_input: "Source requested: code scanning, using the GitHub Connector."
+    invocation_preamble: "Use $codex-security:triage-finding with the GitHub Connector for code scanning in GitHub repo promptfoo/promptfoo."
     expected_github_rest_behavior: explicit_connector
     eval_instructions: |-
       This is an automated eval of the transport decision. Do not query live
@@ -124,6 +124,7 @@
       - transport: "rest" or "github_connector"
       - access: "read_write" or "read_only"
       - unavailable_endpoint: "ignore" or "explain_limitation"
+      - rest_fallback: "always_after_approval" or "only_if_endpoint_unavailable"
       - rest_approval: "not_required", "before_use", or "after_use"
       - rest_account: "specified_account" or "any_available_account"
       - rest_repository: the owner/repo for which REST approval would apply

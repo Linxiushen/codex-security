@@ -123,7 +123,7 @@ const checks = {
   explicit_connector: (text, context) => {
     let decision;
     try {
-      decision = extractJson(text, "github-transport-decision/v0");
+      decision = extractJson(text, "github-transport-decision/v0", { requireSingle: true });
     } catch (error) {
       return [error.message];
     }
@@ -131,6 +131,7 @@ const checks = {
       transport: "github_connector",
       access: "read_only",
       unavailable_endpoint: "explain_limitation",
+      rest_fallback: "only_if_endpoint_unavailable",
       rest_approval: "before_use",
       rest_account: "specified_account",
       rest_repository: new URL(context.vars.target_repo).pathname.slice(1),

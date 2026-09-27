@@ -1,9 +1,11 @@
-module.exports = function extractJson(output, schemaVersion) {
+module.exports = function extractJson(output, schemaVersion, { requireSingle = false } = {}) {
   const text = typeof output === "string" ? output : JSON.stringify(output);
   const fencedBlocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((match) =>
     match[1].trim(),
   );
-  const candidates = fencedBlocks.length > 0 ? fencedBlocks : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
+  const candidates = !requireSingle && fencedBlocks.length > 0
+    ? fencedBlocks
+    : [text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)];
 
   for (const candidate of candidates) {
     if (!candidate) {
