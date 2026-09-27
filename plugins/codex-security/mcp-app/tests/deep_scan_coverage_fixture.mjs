@@ -35,6 +35,7 @@ export async function publishCoverageFixture(
     continueAfterResume = false,
     stopAfterDraft = false,
     receiptRetry = false,
+    retryPending = false,
     questionRows,
     interruptPublication = false,
   } = {},
@@ -246,7 +247,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           complete: true,
           findings: [],
           coverage: {
-            completeness: status,
+            completeness: retryPending ? "partial" : status,
             surfaces: [
               {
                 id: "current",
@@ -256,7 +257,16 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               },
             ],
             explicitExclusions: [],
-            deferred: [],
+            deferred: retryPending
+              ? [
+                  {
+                    id: "prior-gap",
+                    candidateId: "shared-prior-candidate",
+                    reason: "The earlier boundary still needs verification.",
+                    surfaceIds: ["prior", "prior-second"],
+                  },
+                ]
+              : [],
           },
         },
       );
@@ -516,11 +526,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       );
     }
     assert.equal(coverage.completeness, "partial");
-    assert.ok(
-      coverage.deferred.some(
-        (item) =>
-          item.reason === "Verify the earlier attempt's unresolved boundary.",
-      ),
+    assert.deepEqual(
+      pending.map((item) => item.reason).sort(),
+      [
+        retryPending
+          ? "The earlier boundary still needs verification."
+          : "Verify the earlier attempt's unresolved boundary.",
+        "Verify the same candidate's second boundary.",
+      ].sort(),
     );
     assert.match(
       prior[0].receiptRefs[0],

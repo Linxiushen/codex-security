@@ -454,7 +454,7 @@ async function preserveScanDraft(
     const resolvedIds = new Set(
       [
         ...result.findings.map(findingCandidateId),
-        ...candidateRows.map((item) => item.candidateId ?? item.id),
+        ...dispositions.map((item) => item.candidateId ?? item.id),
       ].filter((value): value is string => typeof value === "string"),
     );
     const previousCoverage = {
