@@ -19,13 +19,26 @@ for (const resume of [false, true]) {
         );
         assert.equal(coverage.completeness, "partial");
         assert.equal(coverage.reviews.length, 3);
-        assert.equal(coverage.surfaces.length, 3);
+        assert.deepEqual(
+          coverage.surfaces.map((surface) => surface.label),
+          Array(3).fill(["Archive route", "Archive settings"]).flat(),
+        );
         assert.deepEqual(
           coverage.deferred
             .filter((item) => item.id !== "scan-stopped")
             .map((item) => item.reason),
           ["Verify entry boundaries.", "Verify symbolic links."],
         );
+        for (const item of coverage.deferred.filter(
+          (item) => item.id !== "scan-stopped",
+        )) {
+          const linked = coverage.surfaces.find(
+            (surface) => surface.id === item.surfaceIds[0],
+          );
+          assert.equal(linked.label, "Archive route");
+          assert.equal(linked.provenance.workerId, item.provenance.workerId);
+          assert.equal(linked.provenance.attempt, item.provenance.attempt);
+        }
         for (const surface of coverage.surfaces) {
           assert.equal(
             await readFile(path.join(scanDir, surface.receiptRefs[0]), "utf8"),

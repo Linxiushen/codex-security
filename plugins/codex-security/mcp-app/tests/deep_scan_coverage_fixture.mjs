@@ -175,6 +175,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           disposition: pending ? "needs_follow_up" : "no_issue_found",
           receiptRefs: ["artifacts/review.md"],
         },
+        {
+          id: "shared-surface",
+          label: "Archive settings",
+          disposition: "no_issue_found",
+          receiptRefs: ["artifacts/review.md"],
+        },
       ],
       explicitExclusions: [
         { pattern: "vendor/", reason: "External dependency." },

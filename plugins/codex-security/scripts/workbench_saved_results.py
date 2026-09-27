@@ -710,14 +710,7 @@ def merge_saved_results(
         elif field == "deferred":
             result["id"] = f"{prefix}-deferred-{index}"
             if isinstance(item.get("surfaceIds"), list):
-                surfaces = source.get("surfaces", [])
-                surface_ids = {
-                    surface["id"]: f"{prefix}-surface-{offset}"
-                    for offset, surface in enumerate(
-                        surfaces if isinstance(surfaces, list) else [], 1
-                    )
-                    if isinstance(surface, dict) and isinstance(surface.get("id"), str)
-                }
+                surface_ids: dict[str, str] = {}
                 surfaces = projected_coverage.get("surfaces", [])
                 for surface in surfaces if isinstance(surfaces, list) else []:
                     if not isinstance(surface, dict) or not isinstance(surface.get("id"), str):
@@ -729,7 +722,11 @@ def merge_saved_results(
                         and provenance.get("attempt") == worker["attempt"]
                         and isinstance(provenance.get("sourceId"), str)
                     ):
-                        surface_ids[provenance["sourceId"]] = surface["id"]
+                        surface_ids.setdefault(provenance["sourceId"], surface["id"])
+                surfaces = source.get("surfaces", [])
+                for offset, surface in enumerate(surfaces if isinstance(surfaces, list) else [], 1):
+                    if isinstance(surface, dict) and isinstance(surface.get("id"), str):
+                        surface_ids.setdefault(surface["id"], f"{prefix}-surface-{offset}")
                 result["surfaceIds"] = [
                     surface_ids.get(value, value) if isinstance(value, str) else value
                     for value in item["surfaceIds"]

@@ -318,12 +318,12 @@ export function projectDiscoveryCoverage(
   };
   const prefix = `${worker.id}-attempt-${worker.attempt ?? "unknown"}`;
   const surfaces = coverage.surfaces as Record<string, unknown>[];
-  const surfaceIds = new Map(
-    surfaces.map((surface, index) => [
-      surface.id,
-      `${prefix}-surface-${index + 1}`,
-    ]),
-  );
+  const surfaceIds = new Map<unknown, string>();
+  for (const [index, surface] of surfaces.entries()) {
+    if (!surfaceIds.has(surface.id)) {
+      surfaceIds.set(surface.id, `${prefix}-surface-${index + 1}`);
+    }
+  }
   const project = (item: Record<string, unknown>) => {
     const result = structuredClone(item);
     const descriptions = result.provenance;

@@ -11,6 +11,86 @@ from test_deep_scan_successful_publication import publication_scan as publicatio
 from workbench_test_support import write_checkpoint
 
 
+@pytest.mark.parametrize("parent_surfaces", ["missing", "projected", "renamed"])
+def test_missing_deferred_projection_links_first_duplicate_surface(
+    workbench_api, workbench_db, publication_scan, parent_surfaces
+):
+    scan = publication_scan()
+    result = add_worker(workbench_db, scan)
+    worker_id = result.parent.name
+    surfaces = [
+        {
+            "id": "shared-surface",
+            "label": label,
+            "disposition": disposition,
+            "receiptRefs": [],
+        }
+        for label, disposition in (
+            ("Archive route", "needs_follow_up"),
+            ("Archive settings", "no_issue_found"),
+        )
+    ]
+    deferred = {
+        "id": "pending",
+        "reason": "Verify entry boundaries.",
+        "surfaceIds": ["shared-surface"],
+    }
+    result.write_text(
+        json.dumps(
+            {
+                "scanId": scan.scan_id,
+                "complete": True,
+                "findings": [],
+                "coverage": {
+                    **scan.coverage,
+                    "completeness": "partial",
+                    "surfaces": surfaces,
+                    "deferred": [deferred],
+                },
+            }
+        )
+    )
+    original = result.read_bytes()
+    projected = [
+        {
+            **surface,
+            "id": f"{worker_id}-attempt-1-surface-{index}",
+            "provenance": {"workerId": worker_id, "attempt": 1, "sourceId": surface["id"]},
+        }
+        for index, surface in enumerate(surfaces, 1)
+    ]
+    if parent_surfaces == "renamed":
+        projected[0]["id"] = "canonical-first-surface"
+    (scan.scan_dir / "coverage.json").write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "completeness": "partial",
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+                "surfaces": [] if parent_surfaces == "missing" else projected,
+            }
+        )
+    )
+    workbench_api["fail_scan"](
+        workbench_db,
+        Namespace(scan_id=scan.scan_id, claim_token=None, cost_json=None, message="Stopped."),
+    )
+    recovered = workbench_api["recover_scan_results"](
+        workbench_db, Namespace(scan_id=scan.scan_id)
+    )["scan"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    coverage_path = scan.scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    pending = [item for item in coverage["deferred"] if item.get("reason") == deferred["reason"]]
+    assert len(pending) == 1
+    assert pending[0]["surfaceIds"] == [projected[0]["id"]]
+    assert all(surface in coverage["surfaces"] for surface in projected)
+    assert result.read_bytes() == original
+    published = coverage_path.read_bytes()
+    workbench_api["recover_scan_results"](workbench_db, Namespace(scan_id=scan.scan_id))
+    assert coverage_path.read_bytes() == published
+
+
 @pytest.mark.parametrize("worker_count", [1, 2])
 @pytest.mark.parametrize("missing_parent_surfaces", [False, True])
 @pytest.mark.parametrize("retained_deferred", [False, True])
