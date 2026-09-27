@@ -36,6 +36,16 @@ import {
 } from "./execution-preparation.js";
 
 import {
+  runScanEvents,
+  runScanTurn,
+  readCodexTurn,
+  reconnectDetails,
+  turnFailureMessage,
+  notifyObserver,
+  throwIfAborted,
+} from "./scan-events.js";
+export { runScanEvents, classifyConnectionFailure } from "./scan-events.js";
+import {
   chmod,
   lstat,
   mkdir,
@@ -61,7 +71,13 @@ import {
   savedScanFromWorkbench,
   savedScansFromWorkbench,
 } from "./workbench-types.js";
-import { prepareSemanticScanDraft } from "./scan-semantics.js";
+import {
+  collectResult,
+  publishScan,
+  preservePublishedArtifacts,
+  writeSemanticScanDraft,
+  type CompletedScanTurn,
+} from "./scan-publication.js";
 import { homedir, tmpdir } from "node:os";
 import {
   basename,
@@ -118,7 +134,11 @@ import {
   DeepScanProgressTracker,
   type DeepScanProgress,
 } from "./deep-progress.js";
-import { findScanSession } from "./scan-logs.js";
+import { registerScan, requireScanResumeSession } from "./scan-registration.js";
+import {
+  createScanCostReporter,
+  ScanProgressReporter,
+} from "./scan-monitoring.js";
 import {
   deepScanOptions,
   resolveDeepScanConfig,
@@ -139,7 +159,6 @@ export type { DeepScanOptions, ScanAuthMode } from "./scan-settings.js";
 import {
   loadContract,
   readScanFile,
-  requireScanFile,
   type ScanExpectation,
 } from "./contract.js";
 import {
@@ -202,12 +221,7 @@ import {
   matchCompletedScan,
   matchScanFindingsInternal,
 } from "./scan-comparison.js";
-import {
-  scanProgressUpdatesFromEvent,
-  workerStatusFromEvent,
-  type ScanProgress,
-  type ScanWorkerStatus,
-} from "./worker-progress.js";
+import { type ScanProgress, type ScanWorkerStatus } from "./worker-progress.js";
 import { CODEX_SECURITY_THREAD_SOURCES } from "./thread-source.js";
 import { CODEX_EXECUTABLE_VERSION, CODEX_SDK_VERSION } from "./version.js";
 import {
@@ -449,9 +463,6 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
 
 const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
-const PERSONAL_TRUSTED_ACCESS_URL = "https://chatgpt.com/cyber";
-const ORGANIZATIONAL_TRUSTED_ACCESS_URL =
-  "https://openai.com/form/enterprise-trusted-access-for-cyber/";
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;
   public readonly metadata: CodexSecurityMetadata = {
@@ -1184,8 +1195,6 @@ export class CodexSecurity {
       signal,
       budgetAbortController.signal,
     ]);
-    let maxCostUsd = options.maxCostUsd;
-    let latestCost: Readonly<ScanCost> | null = null;
     let mergeCost: Readonly<ScanCost> | null = null;
     const passCosts = new Map<string, Readonly<ScanCost> | null>();
     const combinedCost = (
@@ -1199,7 +1208,6 @@ export class CodexSecurity {
       current: Readonly<ScanCost> | null,
     ): ScanCost | null =>
       [...passCosts.values()].includes(null) ? null : combinedCost(current);
-    let notifiedLimit: number | undefined;
     let scanDir = "";
     let archivedScanDir: string | null = null;
     let targetPathsFile: string | null = null;
@@ -1219,7 +1227,6 @@ export class CodexSecurity {
       model: string;
       threadId: string | null;
     } | null = null;
-    let preparedTargetWarnings: string[] = [];
     let runPostScan: (() => ReturnType<CodexThreadLike["runStreamed"]>) | null =
       null;
     let recordPostScanThread: ((threadId: string) => Promise<void>) | undefined;
@@ -1445,201 +1452,6 @@ export class CodexSecurity {
           threadId: null,
         };
       }
-      let scopeFileCount: number | null = null;
-      let reviewedFileCount = 0;
-      const reportProgress = (progress: ScanProgress): void => {
-        if (
-          scopeFileCount === null ||
-          progress.filesTotal > scopeFileCount ||
-          progress.filesCompleted < reviewedFileCount
-        ) {
-          return;
-        }
-        reviewedFileCount = progress.filesCompleted;
-        notifyObserver(
-          "onProgress",
-          options.onProgress,
-          options.onObserverError,
-          { ...progress, filesTotal: scopeFileCount },
-        );
-      };
-      const reportTrackingError = (error: unknown): void => {
-        if (options.maxCostUsd !== undefined || options.requireCost) {
-          costAbortController.abort(
-            new ScanCostTrackingError(
-              `Scan interrupted because required cost tracking failed: ${errorMessage(error)}`,
-              scanDir,
-              { cause: error },
-            ),
-          );
-          return;
-        }
-        notifyObserver(
-          "onWarning",
-          options.onWarning,
-          options.onObserverError,
-          `Could not track scan activity: ${errorMessage(error)}`,
-        );
-      };
-      const stopTracking = async (
-        activeTracker: ScanCostTracker,
-        usage?: unknown,
-      ) => {
-        const snapshot = await activeTracker
-          .stop(usage)
-          .catch((error: unknown) => {
-            reportTrackingError(error);
-            return { usage, cost: estimateScanCost(model, usage) };
-          });
-        throwIfAborted(signal, scanDir);
-        return snapshot;
-      };
-      const historicalCost = async (threadId: string) => {
-        const historical = new ScanCostTracker({
-          codexHome: runtime.codexHome,
-          model,
-          repository: repo,
-          scanDirectory: scanDir,
-        });
-        historical.start(threadId);
-        return (await stopTracking(historical)).cost;
-      };
-      const reportCost = (cost: Readonly<ScanCost>): void => {
-        latestCost = cost;
-        notifyObserver(
-          "onCost",
-          options.onCost,
-          options.onObserverError,
-          cost,
-          maxCostUsd,
-        );
-        if (maxCostUsd !== undefined && cost.estimatedUsd > maxCostUsd) {
-          costAbortController.abort(
-            new ScanCostLimitExceededError(maxCostUsd, cost, scanDir),
-          );
-          return;
-        }
-        const request = options.onBudgetApproaching;
-        if (
-          request === undefined ||
-          maxCostUsd === undefined ||
-          budgetSignal.aborted ||
-          notifiedLimit === maxCostUsd ||
-          cost.estimatedUsd < maxCostUsd * 0.8
-        )
-          return;
-        const limit = maxCostUsd;
-        notifiedLimit = limit;
-        void Promise.resolve()
-          .then(async () => {
-            if (budgetSignal.aborted) return;
-            const next = await request({
-              maxCostUsd: limit,
-              cost,
-              signal: budgetSignal,
-            });
-            if (
-              next === undefined ||
-              budgetSignal.aborted ||
-              activeScan === null
-            )
-              return;
-            if (
-              !Number.isFinite(next) ||
-              next <= Math.max(limit, latestCost!.estimatedUsd)
-            ) {
-              throw new CodexSecurityError(
-                "The new cost limit must exceed the current limit and estimated cost.",
-              );
-            }
-            await workbench({ ...activeScan.options, signal: budgetSignal }, [
-              "set-scan-cost-limit",
-              "--scan-id",
-              activeScan.id,
-              "--max-cost-usd",
-              String(next),
-            ]);
-            if (budgetSignal.aborted) return;
-            maxCostUsd = next;
-            notifyObserver(
-              "onCost",
-              options.onCost,
-              options.onObserverError,
-              latestCost!,
-              maxCostUsd,
-            );
-          })
-          .catch((error: unknown) => {
-            if (!budgetSignal.aborted) {
-              notifyObserver(
-                "onWarning",
-                options.onWarning,
-                options.onObserverError,
-                `Could not increase scan cost limit: ${errorMessage(error)}`,
-              );
-            }
-          });
-      };
-      const workerNumber = this.#dependencies.workerNumber;
-      const tracker = new ScanCostTracker({
-        codexHome: runtime.codexHome,
-        model,
-        repository: repo,
-        scanDirectory:
-          mode === "deep"
-            ? join(scanDir, "artifacts", "deep-scan", "merge")
-            : scanDir,
-        maxCostUsd: options.maxCostUsd,
-        workerNumber,
-        onActivity:
-          options.onActivity === undefined
-            ? undefined
-            : (activity) =>
-                notifyObserver(
-                  "onActivity",
-                  options.onActivity,
-                  options.onObserverError,
-                  activity,
-                ),
-        onSessionEvent:
-          options.onSessionEvent === undefined
-            ? undefined
-            : (event) =>
-                notifyObserver(
-                  "onSessionEvent",
-                  options.onSessionEvent,
-                  options.onObserverError,
-                  event,
-                ),
-        onProgress:
-          options.onProgress === undefined ? undefined : reportProgress,
-        onCost:
-          mode === "deep" ||
-          options.onCost !== undefined ||
-          options.maxCostUsd !== undefined
-            ? (cost) => {
-                mergeCost = cost;
-                reportCost(combinedCost(cost)!);
-              }
-            : undefined,
-        onError: reportTrackingError,
-      });
-      costTracker = tracker;
-      const reportScanProgress = (progress: ScanProgress): void => {
-        if (
-          progress.phase === "discovery" &&
-          progress.filesCompleted === 0 &&
-          reviewedFileCount === 0 &&
-          progress.filesTotal !== scopeFileCount
-        ) {
-          scopeFileCount = progress.filesTotal;
-          tracker.setExpectedFilesTotal(scopeFileCount);
-        }
-        reportProgress({
-          ...progress,
-          phase: mode === "deep" ? "discovery" : progress.phase,
-        });
-      };
       const recipe = scanRecipe({
         repository: repo,
         target: normalized,
@@ -1704,159 +1516,176 @@ export class CodexSecurity {
         signal,
         failureMessage: "Could not save the Codex Security scan",
       };
-      let registration =
-        options.resumeScanId !== undefined &&
-        options.registeredScan === undefined
-          ? await workbench(workbenchOptions, [
-              "get-cli-scan-resume",
-              "--scan-id",
-              options.resumeScanId,
-              "--migrate",
-            ])
-          : await workbench(
-              workbenchOptions,
-              [
-                "register-cli-scan",
-                "--repository",
-                repo,
-                "--scan-dir",
-                scanDir,
-                "--registration-json-stdin",
-                ...(options.archiveExisting === true
-                  ? ["--archive-existing"]
-                  : []),
-                ...(archivedScanDir === null
-                  ? []
-                  : ["--archived-scan-dir", archivedScanDir]),
-                ...(options.parentScanId === undefined
-                  ? []
-                  : ["--parent-scan-id", options.parentScanId]),
-              ],
-              JSON.stringify({
-                recipe,
-                userContext: options.scanPrompt,
-                ...(this.#parentScanRole === undefined
-                  ? {}
-                  : { parentScanRole: this.#parentScanRole }),
-                ...(options.registeredScan === undefined
-                  ? {}
-                  : {
-                      scanId: options.registeredScan.scanId,
-                      threadId: options.registeredScan.threadId,
-                      claimToken: options.registeredScan.handoffClaimToken,
-                    }),
-                ...(options.workflowId === undefined
-                  ? {}
-                  : { workflowId: options.workflowId }),
-              }),
-            );
-      if (options.registeredScan !== undefined) {
-        registration = await workbench(workbenchOptions, [
-          "get-cli-scan-resume",
-          "--scan-id",
-          options.registeredScan.scanId,
-        ]);
-      }
-      const scanId = registration["scanId"];
-      let resumeThreadId =
-        options.resumeScanId === undefined &&
-        options.registeredScan === undefined
-          ? undefined
-          : registration["threadId"];
-      const savedRecipe = registration["recipe"];
+      const registered = await registerScan({
+        scan: options,
+        parentScanRole: this.#parentScanRole,
+        recipe,
+        expectation,
+        scanDir,
+        archivedScanDir,
+        workbench: (args, input) => workbench(workbenchOptions, args, input),
+      });
+      const {
+        registration,
+        scanId,
+        targetId,
+        contract,
+        targetKind,
+        snapshotDigest,
+        registeredRevision,
+        targetRevision,
+        sealed,
+      } = registered;
+      let { resumeThreadId } = registered;
       if (
+        !sealed &&
+        mode === "deep" &&
         (options.resumeScanId !== undefined ||
-          options.registeredScan !== undefined) &&
-        isRecord(savedRecipe) &&
-        typeof savedRecipe["knowledgeBaseSha256"] === "string" &&
-        savedRecipe["knowledgeBaseSha256"] !== recipe["knowledgeBaseSha256"]
-      )
-        throw new CodexSecurityError(
-          "The knowledge base changed since this scan started. Restore the original documents before resuming.",
-        );
-      if (options.resumeScanId !== undefined) {
-        if (
-          scanId !== options.resumeScanId ||
-          !isRecord(savedRecipe) ||
-          savedRecipe["repository"] !== repo ||
-          (resumeThreadId !== null && typeof resumeThreadId !== "string") ||
-          JSON.stringify(savedRecipe["target"]) !==
-            JSON.stringify(recipe["target"])
-        ) {
-          throw new CodexSecurityError(
-            "The workbench returned mismatched scan resume context.",
-          );
+          options.registeredScan !== undefined)
+      ) {
+        const readHistoricalCost = async (
+          threadId: string,
+          scanDirectory: string,
+        ) => {
+          const historical = new ScanCostTracker({
+            codexHome: runtime.codexHome,
+            model,
+            repository: repo,
+            scanDirectory,
+          });
+          historical.start(threadId);
+          return (await historical.stop()).cost;
+        };
+        const terminal = await terminalDeepScanError({
+          scanId,
+          scanDir,
+          repository: repo,
+          workbench: (args) => workbench(workbenchOptions, args),
+          historicalCost: (threadId) => readHistoricalCost(threadId, scanDir),
+        });
+        if (terminal !== null) {
+          // A failed optional thread write does not prove the merge was free.
+          if (typeof resumeThreadId !== "string") terminalMergeCost = null;
+          const { constituents } = terminal.accounting;
+          if (
+            constituents !== null &&
+            typeof resumeThreadId === "string" &&
+            resumeThreadId !== terminal.accounting.legacyThreadId
+          ) {
+            terminalMergeCost = await readHistoricalCost(
+              resumeThreadId,
+              join(scanDir, "artifacts/deep-scan/merge"),
+            ).catch(() => null);
+          }
+          activeScan = { id: scanId, options: workbenchOptions };
+          throw terminal;
         }
       }
-      if (typeof registration["sealedProducerVersion"] === "string") {
-        expectation.pluginVersion = registration["sealedProducerVersion"];
-      }
-      const targetId = registration["targetId"];
-      const contract = registration["contract"];
-      const contractTarget = isRecord(contract)
-        ? contract["target"]
-        : undefined;
-      const allowedKinds = isRecord(contractTarget)
-        ? contractTarget["allowedKinds"]
-        : undefined;
-      const targetKind =
-        Array.isArray(allowedKinds) && allowedKinds.length === 1
-          ? allowedKinds[0]
-          : undefined;
-      const diffTarget = isRecord(contract)
-        ? contract["diffTarget"]
-        : undefined;
-      const snapshotDigest =
-        targetKind === "git_diff" && isRecord(diffTarget)
-          ? diffTarget["contentDigest"]
-          : isRecord(contractTarget)
-            ? contractTarget["requiredSnapshotDigest"]
-            : undefined;
-      const registeredRevision = registration["targetRevision"];
-      if (
-        typeof scanId !== "string" ||
-        typeof targetId !== "string" ||
-        registration["scanDir"] !== scanDir ||
-        typeof targetKind !== "string" ||
-        ![
-          "git_revision",
-          "git_worktree",
-          "git_diff",
-          "directory_snapshot",
-        ].includes(targetKind) ||
-        (snapshotDigest !== undefined && typeof snapshotDigest !== "string") ||
-        ((targetKind === "git_worktree" ||
-          targetKind === "directory_snapshot") &&
-          typeof snapshotDigest !== "string") ||
-        typeof registeredRevision !== "string"
-      ) {
-        throw new CodexSecurityError(
-          "The Codex Security workbench returned an invalid scan registration.",
-        );
-      }
-      const targetRevision =
-        registeredRevision === "unversioned" ? null : registeredRevision;
-      const registeredFileCount = registration["scopeFileCount"];
-      scopeFileCount =
-        typeof registeredFileCount === "number" &&
-        Number.isSafeInteger(registeredFileCount) &&
-        registeredFileCount >= 0
-          ? registeredFileCount
-          : null;
-      if (scopeFileCount !== null) {
-        tracker.setExpectedFilesTotal(scopeFileCount);
+      await requireScanResumeSession({
+        registration: registered,
+        codexHome: runtime.codexHome,
+        scanDir,
+        mode,
+      });
+      const progress = new ScanProgressReporter(mode, options);
+      const reportProgress = progress.report;
+      const reportTrackingError = (error: unknown): void => {
+        if (options.maxCostUsd !== undefined || options.requireCost) {
+          costAbortController.abort(
+            new ScanCostTrackingError(
+              `Scan interrupted because required cost tracking failed: ${errorMessage(error)}`,
+              scanDir,
+              { cause: error },
+            ),
+          );
+          return;
+        }
         notifyObserver(
-          "onProgress",
-          options.onProgress,
+          "onWarning",
+          options.onWarning,
           options.onObserverError,
-          {
-            phase: "preflight",
-            filesCompleted: 0,
-            filesTotal: scopeFileCount,
-          },
+          `Could not track scan activity: ${errorMessage(error)}`,
         );
-      }
-      const sealed = typeof registration["sealedProducerVersion"] === "string";
+      };
+      const stopTracking = async (
+        activeTracker: ScanCostTracker,
+        usage?: unknown,
+      ) => {
+        const snapshot = await activeTracker
+          .stop(usage)
+          .catch((error: unknown) => {
+            reportTrackingError(error);
+            return { usage, cost: estimateScanCost(model, usage) };
+          });
+        throwIfAborted(signal, scanDir);
+        return snapshot;
+      };
+      const historicalCost = async (threadId: string) => {
+        const historical = new ScanCostTracker({
+          codexHome: runtime.codexHome,
+          model,
+          repository: repo,
+          scanDirectory: scanDir,
+        });
+        historical.start(threadId);
+        return (await stopTracking(historical)).cost;
+      };
+      const reportCost = createScanCostReporter({
+        options,
+        scanDir,
+        costAbortController,
+        budgetSignal,
+        getActiveScan: () => activeScan,
+        workbench,
+      });
+      const workerNumber = this.#dependencies.workerNumber;
+      const tracker = new ScanCostTracker({
+        codexHome: runtime.codexHome,
+        model,
+        repository: repo,
+        scanDirectory:
+          mode === "deep"
+            ? join(scanDir, "artifacts", "deep-scan", "merge")
+            : scanDir,
+        maxCostUsd: options.maxCostUsd,
+        workerNumber,
+        onActivity:
+          options.onActivity === undefined
+            ? undefined
+            : (activity) =>
+                notifyObserver(
+                  "onActivity",
+                  options.onActivity,
+                  options.onObserverError,
+                  activity,
+                ),
+        onSessionEvent:
+          options.onSessionEvent === undefined
+            ? undefined
+            : (event) =>
+                notifyObserver(
+                  "onSessionEvent",
+                  options.onSessionEvent,
+                  options.onObserverError,
+                  event,
+                ),
+        onProgress:
+          options.onProgress === undefined ? undefined : reportProgress,
+        onCost:
+          mode === "deep" ||
+          options.onCost !== undefined ||
+          options.maxCostUsd !== undefined
+            ? (cost) => {
+                mergeCost = cost;
+                reportCost(combinedCost(cost)!);
+              }
+            : undefined,
+        onError: reportTrackingError,
+      });
+      costTracker = tracker;
+      const reportScanProgress = (update: ScanProgress): void =>
+        progress.fromScan(update, tracker);
+      progress.preflight(registered.scopeFileCount, tracker);
       let sealedThreadId: string | null = null;
       if (sealed) {
         // Reconcile sealing before the ordinary completion transaction without rewriting artifacts.
@@ -1915,66 +1744,6 @@ export class CodexSecurity {
             scanDir,
           );
       } else {
-        if (
-          mode === "deep" &&
-          (options.resumeScanId !== undefined ||
-            options.registeredScan !== undefined)
-        ) {
-          const readHistoricalCost = async (
-            threadId: string,
-            scanDirectory: string,
-          ) => {
-            const historical = new ScanCostTracker({
-              codexHome: runtime.codexHome,
-              model,
-              repository: repo,
-              scanDirectory,
-            });
-            historical.start(threadId);
-            return (await historical.stop()).cost;
-          };
-          const terminal = await terminalDeepScanError({
-            scanId,
-            scanDir,
-            repository: repo,
-            workbench: (args) => workbench(workbenchOptions, args),
-            historicalCost: (threadId) => readHistoricalCost(threadId, scanDir),
-          });
-          if (terminal !== null) {
-            // A failed optional thread write does not prove the merge was free.
-            if (typeof resumeThreadId !== "string") terminalMergeCost = null;
-            const { constituents } = terminal.accounting;
-            if (
-              constituents !== null &&
-              typeof resumeThreadId === "string" &&
-              resumeThreadId !== terminal.accounting.legacyThreadId
-            ) {
-              terminalMergeCost = await readHistoricalCost(
-                resumeThreadId,
-                join(scanDir, "artifacts/deep-scan/merge"),
-              ).catch(() => null);
-            }
-            activeScan = { id: scanId, options: workbenchOptions };
-            throw terminal;
-          }
-        }
-        if (typeof resumeThreadId === "string") {
-          const savedSession = await findScanSession(
-            runtime.codexHome,
-            resumeThreadId,
-          );
-          if (
-            savedSession === null ||
-            savedSession.workingDirectory !==
-              (mode === "deep"
-                ? join(scanDir, "artifacts", "deep-scan", "merge")
-                : scanDir)
-          ) {
-            throw new CodexSecurityError(
-              `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-            );
-          }
-        }
         if (
           mode === "deep" &&
           options.maxCostUsd !== undefined &&
@@ -2082,9 +1851,9 @@ export class CodexSecurity {
       }
       checkOpen();
       let prompt =
-        scopeFileCount === null
+        progress.scopeFileCount === null
           ? basePrompt
-          : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
+          : `${basePrompt}\nThe SDK's current in-scope file-count estimate is ${progress.scopeFileCount}; use it for scan progress unless exact scoped-source enumeration establishes a different total before review begins.`;
       if (options.resumeScanId !== undefined) {
         prompt +=
           "\nContinue this saved scan in its original session. Preserve its checkpoints and completed analysis; finish the remaining review and canonical artifacts without registering or completing another scan.";
@@ -2278,11 +2047,11 @@ export class CodexSecurity {
             falsePositives: falsePositiveExamples,
             signal,
             run: async (validationPrompt, outputSchema) => {
-              if (scopeFileCount !== null)
+              if (progress.scopeFileCount !== null)
                 reportProgress({
                   phase: "validation",
-                  filesCompleted: reviewedFileCount,
-                  filesTotal: scopeFileCount,
+                  filesCompleted: progress.reviewedFileCount,
+                  filesTotal: progress.scopeFileCount,
                 });
               const validationThread = codex.startThread({
                 threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2336,47 +2105,12 @@ export class CodexSecurity {
           mode === "deep" && snapshot.cost !== null
             ? completeCost(snapshot.cost)
             : (snapshot.cost ?? savedCost);
-        if (mode === "deep" && scopeFileCount !== null)
+        if (mode === "deep" && progress.scopeFileCount !== null)
           reportProgress({
             phase: "reporting",
-            filesCompleted: reviewedFileCount,
-            filesTotal: scopeFileCount,
+            filesCompleted: progress.reviewedFileCount,
+            filesTotal: progress.scopeFileCount,
           });
-        let preparation: JsonObject;
-        try {
-          preparation = await workbench(workbenchOptions, [
-            "prepare-scan-completion",
-            "--scan-id",
-            scanId,
-          ]);
-        } catch (error) {
-          const saved = await workbench(workbenchOptions, [
-            "get-scan",
-            "--scan-id",
-            scanId,
-          ]).catch(() => null);
-          const savedScan = isRecord(saved) ? saved["scan"] : undefined;
-          const progress = isRecord(savedScan)
-            ? savedScan["progress"]
-            : undefined;
-          const failureMessage = isRecord(savedScan)
-            ? savedScan["failureMessage"]
-            : undefined;
-          if (
-            isRecord(progress) &&
-            progress["status"] === "failed" &&
-            typeof failureMessage === "string" &&
-            failureMessage.trim() !== ""
-          ) {
-            throw new IncompleteScanError(failureMessage);
-          }
-          throw error;
-        }
-        preparedTargetWarnings = Array.isArray(preparation["targetWarnings"])
-          ? preparation["targetWarnings"].filter(
-              (warning): warning is string => typeof warning === "string",
-            )
-          : [];
         return mode === "deep"
           ? completionCost === null
             ? null
@@ -2389,7 +2123,7 @@ export class CodexSecurity {
           : (await thread.runStreamed(prompt, { signal })).events;
       checkOpen();
 
-      const result = sealed
+      const completedTurn: CompletedScanTurn = sealed
         ? await (async () => {
             budgetAbortController.abort();
             const snapshot = await stopTracking(tracker);
@@ -2401,8 +2135,9 @@ export class CodexSecurity {
                 measuredCost.estimatedUsd > completionCost.estimatedUsd)
             )
               completionCost = measuredCost;
-            return collectResult(
-              {
+            return {
+              threadId: sealedThreadId,
+              turnResult: {
                 status: "completed",
                 model,
                 usage: completionCost
@@ -2411,13 +2146,7 @@ export class CodexSecurity {
                     ? null
                     : snapshot.usage,
               },
-              sealedThreadId,
-              scanDir,
-              runtime.plugin.installedRoot,
-              expectation,
-              signal,
-              true,
-            );
+            };
           })()
         : mode === "deep"
           ? await (async () => {
@@ -2577,50 +2306,22 @@ export class CodexSecurity {
                     );
                   return JSON.parse(turn.finalResponse);
                 },
-                publish: async (draft) => {
-                  const documents = prepareSemanticScanDraft(
+                publish: (draft) =>
+                  writeSemanticScanDraft(
                     {
-                      targetContract: contract as Record<string, unknown>,
-                      mode,
-                      targetRevision: registeredRevision,
+                      scanDir,
+                      contract: {
+                        targetContract: contract as Record<string, unknown>,
+                        mode,
+                        targetRevision: registeredRevision,
+                      },
+                      writer: artifactWriter!,
+                      workbench: ownedWorkbench,
+                      onCleanupError: (error) =>
+                        warnCleanupFailed(options, error),
                     },
                     draft,
-                  );
-                  const draftPath = `drafts/${randomUUID()}.json`;
-                  const checkpointPath = `drafts/${randomUUID()}.checkpoint.json`;
-                  const staged: string[] = [];
-                  try {
-                    await artifactWriter!.restore(
-                      draftPath,
-                      Buffer.from(JSON.stringify(documents)),
-                    );
-                    staged.push(draftPath);
-                    await artifactWriter!.restore(
-                      checkpointPath,
-                      Buffer.from(JSON.stringify(draft)),
-                    );
-                    staged.push(checkpointPath);
-                    await ownedWorkbench([
-                      "write-scan-draft",
-                      "--scan-id",
-                      scanId,
-                      "--draft-path",
-                      join(scanDir, draftPath),
-                      "--checkpoint-path",
-                      join(scanDir, checkpointPath),
-                    ]);
-                  } finally {
-                    await Promise.all(
-                      staged.map(async (path) => {
-                        try {
-                          await artifactWriter!.remove(path);
-                        } catch (error) {
-                          warnCleanupFailed(options, error);
-                        }
-                      }),
-                    );
-                  }
-                },
+                  ),
               });
               if (budgetRecovery !== null)
                 budgetRecovery.threadId ??=
@@ -2631,17 +2332,12 @@ export class CodexSecurity {
               );
               const resultThreadId =
                 thread.id ?? checkpoint.legacy?.originThreadId ?? null;
-              return await collectResult(
-                { status: "completed", model, usage },
-                resultThreadId,
-                scanDir,
-                runtime.plugin.installedRoot,
-                expectation,
-                signal,
-                true,
-              );
+              return {
+                threadId: resultThreadId,
+                turnResult: { status: "completed", model, usage },
+              };
             })()
-          : await runScanEvents({
+          : await runScanTurn({
               thread,
               events: events!,
               signal,
@@ -2699,115 +2395,66 @@ export class CodexSecurity {
               onObserverError: options.onObserverError,
             });
       checkOpen();
-      const completion = await workbench(workbenchOptions, [
-        "complete-scan",
-        "--scan-id",
-        scanId,
-        ...(completionCost === null
-          ? []
-          : ["--cost-json", JSON.stringify(completionCost)]),
-      ]);
+      const { result, warnings } = await publishScan(
+        {
+          scanId,
+          scanDir,
+          pluginRoot: runtime.plugin.installedRoot,
+          expectation,
+          signal,
+          workbench: (args) => workbench(workbenchOptions, args),
+        },
+        completedTurn,
+        completionCost,
+        sealed,
+      );
       activeScan = null;
-      const completedScan = completion["scan"];
-      if (isRecord(completedScan) && Array.isArray(completedScan["warnings"])) {
-        const targetWarnings = new Set([
-          ...preparedTargetWarnings,
-          ...(Array.isArray(completion["targetWarnings"])
-            ? completion["targetWarnings"].filter(
-                (warning): warning is string => typeof warning === "string",
-              )
-            : []),
-        ]);
-        for (const warning of completedScan["warnings"]) {
-          if (typeof warning === "string") {
-            notifyObserver(
-              "onWarning",
-              options.onWarning,
-              options.onObserverError,
-              warning,
-              targetWarnings.has(warning)
-                ? { kind: "target_changed" }
-                : undefined,
-            );
-          }
-        }
+      for (const warning of warnings) {
+        notifyObserver(
+          "onWarning",
+          options.onWarning,
+          options.onObserverError,
+          warning.message,
+          warning.targetChanged ? { kind: "target_changed" } : undefined,
+        );
       }
       if (runPostScan !== null) {
         const followUp = runPostScan;
         runPostScan = null;
-        const completedArtifacts = await Promise.all(
-          [
-            ...new Set([
-              "scan-manifest.json",
-              "findings.json",
-              "coverage.json",
-              "report.md",
-              ...result.manifest.scan.artifacts.map(
-                (artifact) => artifact.path,
-              ),
-            ]),
-          ].map(async (name) => ({
-            name,
-            contents: await readScanFile(scanDir, name, name, signal),
-          })),
-        );
-        let artifactRestorer: ScanArtifactRestorer | null = null;
-        try {
-          artifactRestorer = await prepareArtifactRestorer(
-            workbenchOptions,
-            scanDir,
-          );
-          await runScanEvents({
-            thread,
-            events: (await followUp()).events,
+        const failure = await preservePublishedArtifacts(
+          {
+            result,
             signal,
-            scanDir,
             pluginRoot: runtime.plugin.installedRoot,
             expectation,
-            model,
-            onThreadStarted: recordPostScanThread,
-            onReconnect: options.onReconnect,
-            onWorkerStatus: options.onWorkerStatus,
-            onObserverError: options.onObserverError,
-          });
-          checkOpen();
-        } catch (error) {
-          if (artifactRestorer !== null) {
-            for (const artifact of completedArtifacts) {
-              try {
-                await artifactRestorer.restore(
-                  artifact.name,
-                  artifact.contents,
-                );
-              } catch (cause) {
-                artifactRestorationFailure = new OutputDirectoryError(
-                  "Cannot restore an artifact outside the scan directory.",
-                  { cause },
-                );
-                throw artifactRestorationFailure;
-              }
-            }
-          }
-          if (
-            signal.aborted ||
-            this.#closed ||
-            error instanceof ScanPermissionError
-          )
-            throw error;
-          await collectResult(
-            result.turnResult,
-            result.threadId,
-            scanDir,
-            runtime.plugin.installedRoot,
-            expectation,
-            signal,
-            true,
-          );
+            onRestorationError(error) {
+              artifactRestorationFailure = error;
+            },
+          },
+          () => prepareArtifactRestorer(workbenchOptions, scanDir),
+          async () => {
+            await runScanEvents({
+              thread,
+              events: (await followUp()).events,
+              signal,
+              scanDir,
+              pluginRoot: runtime.plugin.installedRoot,
+              expectation,
+              model,
+              onThreadStarted: recordPostScanThread,
+              onReconnect: options.onReconnect,
+              onWorkerStatus: options.onWorkerStatus,
+              onObserverError: options.onObserverError,
+            });
+            checkOpen();
+          },
+        );
+        if (failure !== undefined) {
           notifyObserver(
             "onWarning",
             options.onWarning,
             options.onObserverError,
-            `Could not run post-scan instructions: ${errorMessage(error)}`,
+            `Could not run post-scan instructions: ${errorMessage(failure.error)}`,
           );
         }
       }
@@ -4276,335 +3923,6 @@ async function removeTargetPathsFile(path: string | null): Promise<void> {
   }
 }
 
-interface ScanEventRunOptions {
-  thread: CodexThreadLike;
-  events: AsyncGenerator<ScanEvent>;
-  signal: AbortSignal;
-  scanDir: string;
-  pluginRoot: string;
-  expectation: ScanExpectation;
-  authentication?: ScanAuthentication;
-  workbenchValidated?: boolean;
-  model?: string;
-  expectedFilesTotal?: number;
-  onFinalize?: (usage: unknown) => Promise<unknown>;
-  onThreadStarted?: (threadId: string) => Promise<void> | void;
-  onScanStarted?: () => void;
-  onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
-  onReconnect?: (
-    attempt: number,
-    maxAttempts: number,
-    details?: ScanReconnectDetails,
-  ) => void;
-  onActivity?: (activity: ScanActivity) => void;
-  onProgress?: (progress: ScanProgress) => void;
-  onWorkerStatus?: (status: ScanWorkerStatus) => void;
-  onWarning?: (warning: string) => void;
-  onObserverError?: (observer: ScanObserverName, error: unknown) => void;
-}
-
-/** @internal */
-export async function runScanEvents(
-  options: ScanEventRunOptions,
-): Promise<ScanResult> {
-  let scanStarted = false;
-  let tacStatusReported = false;
-  try {
-    const turn = await readCodexTurn({
-      thread: options.thread,
-      events: options.events,
-      onEvent: async (event) => {
-        if (!tacStatusReported) {
-          const tacStatus = trustedAccessStatusFromEvent(event);
-          if (tacStatus !== null) {
-            tacStatusReported = true;
-            notifyObserver(
-              "onTrustedAccessStatus",
-              options.onTrustedAccessStatus,
-              options.onObserverError,
-              tacStatus,
-            );
-            if (tacStatus !== "granted") {
-              notifyObserver(
-                "onWarning",
-                options.onWarning,
-                options.onObserverError,
-                trustedAccessWarning(tacStatus, options.authentication),
-              );
-            }
-          }
-        }
-        for (const activity of scanActivitiesFromEvent(
-          event,
-          options.expectation.repository,
-        )) {
-          notifyObserver(
-            "onActivity",
-            options.onActivity,
-            options.onObserverError,
-            activity,
-          );
-        }
-        for (const progress of scanProgressUpdatesFromEvent(event)) {
-          if (
-            options.expectedFilesTotal !== undefined &&
-            progress.filesTotal !== options.expectedFilesTotal
-          ) {
-            continue;
-          }
-          notifyObserver(
-            "onProgress",
-            options.onProgress,
-            options.onObserverError,
-            progress,
-          );
-        }
-        const workerStatus = workerStatusFromEvent(event);
-        if (workerStatus !== null) {
-          notifyObserver(
-            "onWorkerStatus",
-            options.onWorkerStatus,
-            options.onObserverError,
-            workerStatus,
-          );
-        }
-        if (event.type === "thread.started") {
-          const startedThreadId = event["thread_id"];
-          if (typeof startedThreadId === "string") {
-            await options.onThreadStarted?.(startedThreadId);
-          }
-          if (!scanStarted) {
-            scanStarted = true;
-            notifyObserver(
-              "onScanStarted",
-              options.onScanStarted,
-              options.onObserverError,
-            );
-          }
-        }
-      },
-      onReconnect: (message, reconnect) => {
-        notifyObserver(
-          "onReconnect",
-          options.onReconnect,
-          options.onObserverError,
-          ...reconnect,
-          reconnectDetails(message),
-        );
-      },
-    });
-    const { status, threadId, finalResponse, lastStreamError } = turn;
-    let { usage } = turn;
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-      );
-    }
-    if (status !== "completed") {
-      throw new IncompleteScanError(
-        lastStreamError ??
-          "Codex Security event stream ended before the turn completed.",
-      );
-    }
-    if (threadId === null) {
-      throw new IncompleteScanError(
-        "Codex Security did not report a thread ID.",
-      );
-    }
-    if (options.onFinalize !== undefined) {
-      usage = (await options.onFinalize(usage)) ?? usage;
-    }
-    const result = await collectResult(
-      {
-        status,
-        finalResponse,
-        usage,
-        ...(options.model === undefined ? {} : { model: options.model }),
-      },
-      threadId,
-      options.scanDir,
-      options.pluginRoot,
-      options.expectation,
-      options.signal,
-      options.workbenchValidated,
-    );
-    if (options.signal.aborted) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-      );
-    }
-    return result;
-  } catch (error) {
-    if (options.signal.reason instanceof ScanCostLimitExceededError) {
-      throw options.signal.reason;
-    }
-    if (options.signal.aborted && !(error instanceof ScanInterruptedError)) {
-      throw new ScanInterruptedError(
-        `Codex Security scan was interrupted; partial output remains at ${options.scanDir}.`,
-        options.scanDir,
-        { cause: error },
-      );
-    }
-    throw error;
-  }
-}
-
-async function readCodexTurn(options: {
-  thread: CodexThreadLike;
-  events: AsyncGenerator<ScanEvent>;
-  onEvent?: (event: ScanEvent) => Promise<void> | void;
-  onReconnect?: (message: string, attempts: [number, number]) => void;
-}): Promise<{
-  threadId: string | null;
-  status: "in_progress" | "completed";
-  finalResponse: string;
-  usage: unknown;
-  lastStreamError: string | null;
-}> {
-  let threadId = options.thread.id;
-  let status: "in_progress" | "completed" = "in_progress";
-  let finalResponse = "";
-  let usage: unknown = null;
-  let lastStreamError: string | null = null;
-  for await (const event of eventsWithOptionalUsage(options.events)) {
-    await options.onEvent?.(event);
-    if (
-      event.type === "thread.started" &&
-      typeof event["thread_id"] === "string"
-    ) {
-      threadId = event["thread_id"];
-    } else if (
-      event.type === "item.completed" &&
-      isRecord(event["item"]) &&
-      event["item"]["type"] === "agent_message" &&
-      typeof event["item"]["text"] === "string"
-    ) {
-      finalResponse = event["item"]["text"];
-    } else if (event.type === "turn.completed") {
-      status = "completed";
-      usage = event["usage"];
-      break;
-    } else if (event.type === "turn.failed") {
-      throw new CodexSecurityError(turnFailureMessage(event["error"]));
-    } else if (event.type === "error" && typeof event["message"] === "string") {
-      const message = event["message"];
-      const classification = classifyConnectionFailure(message);
-      if (classification === "unauthorized" || classification === "forbidden") {
-        throw new CodexSecurityError(message);
-      }
-      const reconnect = reconnectAttempt(message);
-      if (reconnect === null) throw new CodexSecurityError(message);
-      lastStreamError = message;
-      options.onReconnect?.(message, reconnect);
-    }
-  }
-  return { threadId, status, finalResponse, usage, lastStreamError };
-}
-
-async function* eventsWithOptionalUsage(
-  events: AsyncGenerator<ScanEvent>,
-): AsyncGenerator<ScanEvent> {
-  try {
-    yield* events;
-  } catch (error) {
-    if (
-      error instanceof TypeError &&
-      /\b(?:null|undefined)\b/u.test(error.message) &&
-      /\bcache_write_input_tokens\b/u.test(error.message)
-    ) {
-      yield { type: "turn.completed", usage: null };
-      return;
-    }
-    throw error;
-  }
-}
-
-function trustedAccessStatusFromEvent(
-  event: ScanEvent,
-): ScanTrustedAccessStatus | null {
-  if (event.type !== "item.completed" || !isRecord(event["item"])) {
-    return null;
-  }
-
-  const item = event["item"];
-  if (
-    item["type"] !== "mcp_tool_call" ||
-    item["server"] !== "codex_apps" ||
-    item["tool"] !== "get_tac_status"
-  ) {
-    return null;
-  }
-
-  if (item["status"] !== "completed" || !isRecord(item["result"])) {
-    return "unknown";
-  }
-
-  const result = item["result"]["structured_content"];
-  if (
-    !isRecord(result) ||
-    result["schemaVersion"] !== 1 ||
-    !Array.isArray(result["grants"]) ||
-    typeof result["checkedAt"] !== "string" ||
-    Number.isNaN(Date.parse(result["checkedAt"])) ||
-    result["stale"] !== false
-  ) {
-    return "unknown";
-  }
-
-  const status = result["status"];
-  if (
-    status !== "granted" &&
-    status !== "not_granted" &&
-    status !== "unknown"
-  ) {
-    return "unknown";
-  }
-  if (
-    result["grants"].some((grant) => !isTrustedAccessGrant(grant)) ||
-    (status === "granted") !== result["grants"].length > 0
-  ) {
-    return "unknown";
-  }
-  return status;
-}
-
-function isTrustedAccessGrant(grant: unknown): boolean {
-  if (!isRecord(grant)) return false;
-  const level = grant["level"];
-  const source = grant["source"];
-  return (
-    (source === "user" && (level === "tac1" || level === "tac2")) ||
-    (source === "current_account" &&
-      (level === "tac1" || level === "tac3" || level === "government"))
-  );
-}
-
-function trustedAccessWarning(
-  status: Exclude<ScanTrustedAccessStatus, "granted">,
-  authentication?: ScanAuthentication,
-): string {
-  const apiOrganization =
-    (authentication?.method === "api_key" &&
-      (authentication.source === "OPENAI_API_KEY" ||
-        authentication.source === "CODEX_API_KEY")) ||
-    (authentication?.method === "stored_credentials" &&
-      authentication.credentialType === "api_key");
-  const applicationUrl = apiOrganization
-    ? ORGANIZATIONAL_TRUSTED_ACCESS_URL
-    : PERSONAL_TRUSTED_ACCESS_URL;
-  if (status === "not_granted") {
-    const account = apiOrganization ? "your API organization" : "your account";
-    return `Some cybersecurity requests or findings may be refused because ${account} does not have Trusted Access for Cyber. Apply at ${applicationUrl}.`;
-  }
-  const access = apiOrganization
-    ? "Trusted Access for Cyber for your API organization"
-    : "your Trusted Access for Cyber status";
-  const action = apiOrganization ? "your organization's access" : "your access";
-  return `Some cybersecurity requests or findings may be refused because ${access} could not be verified. Check ${action} or apply at ${applicationUrl}.`;
-}
-
 function scanPrompt(
   target: NormalizedTarget,
   mode: ScanMode,
@@ -4846,63 +4164,6 @@ function scanCostUsage(
   };
 }
 
-async function collectResult(
-  turnResult: TurnResultMetadata,
-  threadId: string | null,
-  scanDir: string,
-  pluginRoot: string,
-  expectation: ScanExpectation,
-  signal: AbortSignal,
-  workbenchValidated = false,
-): Promise<ScanResult> {
-  const required = [
-    "scan-manifest.json",
-    "findings.json",
-    "coverage.json",
-    "report.md",
-  ];
-  const missing: string[] = [];
-  for (const name of required) {
-    try {
-      await requireScanFile(scanDir, name, name, signal);
-    } catch (error) {
-      if (signal.aborted) throw signal.reason ?? error;
-      missing.push(name);
-    }
-  }
-  if (missing.length > 0) {
-    throw new IncompleteScanError(
-      `Codex Security scan completed without required artifacts: ${missing.join(", ")}`,
-    );
-  }
-  const { manifest, findings, coverage } = await loadContract(scanDir, {
-    pluginRoot,
-    expectation,
-    workbenchValidated,
-    signal,
-  });
-  let sarifPath: string | null = null;
-  try {
-    sarifPath = await requireScanFile(
-      scanDir,
-      "exports/results.sarif",
-      "exports/results.sarif",
-      signal,
-    );
-  } catch (error) {
-    if (signal.aborted) throw signal.reason ?? error;
-  }
-  return new ScanResult({
-    manifest,
-    findings,
-    coverage,
-    scanDir,
-    threadId,
-    turnResult,
-    sarifPath,
-  });
-}
-
 /** Shell-neutral guidance so PowerShell users are not told to run POSIX `unset`. */
 export function formatEnvironmentVariableRemovalGuidance(
   names: readonly string[],
@@ -4919,109 +4180,8 @@ export function formatEnvironmentVariableRemovalGuidance(
   return `remove ${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]} from the environment`;
 }
 
-function notifyObserver<Arguments extends unknown[]>(
-  observerName: ScanObserverName,
-  observer: ((...args: Arguments) => void) | undefined,
-  onObserverError:
-    ((observer: ScanObserverName, error: unknown) => void) | undefined,
-  ...args: Arguments
-): void {
-  void Promise.resolve()
-    .then(() => observer?.(...args))
-    .catch((error: unknown) => onObserverError?.(observerName, error))
-    .catch(() => {});
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function reconnectAttempt(message: string): [number, number] | null {
-  const match =
-    /^Reconnecting(?:\.\.\.|…)[ \t]+([1-9]\d{0,2})\/([1-9]\d{0,2})(?=[ \t(]|$)/u.exec(
-      message,
-    );
-  if (match === null) return null;
-  const attempt = Number(match[1]);
-  const maxAttempts = Number(match[2]);
-  return attempt <= maxAttempts ? [attempt, maxAttempts] : null;
-}
-
-function reconnectDetails(message: string): ScanReconnectDetails | undefined {
-  const classification = classifyConnectionFailure(message);
-  if (classification !== "rate_limited") {
-    if (classification === "network_error") return { reason: "network" };
-    if (classification === "unauthorized") return { reason: "authentication" };
-    if (classification === "forbidden") return { reason: "authorization" };
-    return undefined;
-  }
-  const delay =
-    /\b(?:try again|retry)\s+in\s+(\d{1,6}(?:\.\d{1,3})?)\s*(?:s\b|seconds?\b)/iu.exec(
-      message,
-    );
-  const retryAfterSeconds = delay === null ? NaN : Number(delay[1]);
-  return {
-    reason: "rate_limit",
-    ...(Number.isFinite(retryAfterSeconds) &&
-    retryAfterSeconds > 0 &&
-    retryAfterSeconds <= 3_600
-      ? { retryAfterSeconds }
-      : {}),
-  };
-}
-
-// A failed turn must fail the scan whatever its error payload looks like.
-function turnFailureMessage(error: unknown): string {
-  if (isRecord(error) && typeof error["message"] === "string") {
-    const message = error["message"].trim();
-    if (message.length > 0) return error["message"];
-  }
-  return "The Codex Security scan turn failed without a readable error message.";
-}
-
-export function classifyConnectionFailure(
-  error: unknown,
-):
-  | "rate_limited"
-  | "unauthorized"
-  | "forbidden"
-  | "network_error"
-  | "timeout"
-  | "unknown" {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
-    return "unknown";
-  }
-  if (
-    /\brate[_ -]?limit(?:ed|[_ -]exceeded)?\b|\b429\b|\btoo many requests\b/iu.test(
-      message,
-    )
-  ) {
-    return "rate_limited";
-  }
-  if (
-    /\b401\b|\bunauthori[sz]ed\b|\binvalid[_ -](?:api[_ -]?key|authentication|token|credentials?)\b|\b(?:expired|revoked)[_ -](?:api[_ -]?key|token|credentials?)\b|\b(?:api[_ -]?key|token|credentials?)(?: has)? (?:expired|been revoked)\b/iu.test(
-      message,
-    )
-  ) {
-    return "unauthorized";
-  }
-  if (
-    /\b403\b|\bforbidden\b|\bpermission denied\b|\b(?:model|organization|project) access\b|\b(?:access denied|do not have access|not authorized|insufficient permissions)\b|\bmodel[_ -]?not[_ -]?found\b/iu.test(
-      message,
-    )
-  ) {
-    return "forbidden";
-  }
-  if (
-    /\b(?:ENOTFOUND|ECONNRESET|ECONNREFUSED|EHOSTUNREACH|ETIMEDOUT)\b|\b(?:network|connection|TLS|DNS)\b|\berror sending request\b/iu.test(
-      message,
-    )
-  ) {
-    return "network_error";
-  }
-  if (/\b(?:timed? out|timeout)\b/iu.test(message)) return "timeout";
-  return "unknown";
 }
 
 export function scanRuntimeCodexConfig(
@@ -5301,21 +4461,6 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (Object.keys(sanitized).length > 0) result["projects"] = sanitized;
   }
   return result;
-}
-
-function throwIfAborted(signal?: AbortSignal, scanDir = ""): void {
-  if (!signal?.aborted) return;
-  if (
-    signal.reason instanceof ScanCostLimitExceededError ||
-    signal.reason instanceof ScanCostTrackingError ||
-    signal.reason instanceof ScanPermissionError ||
-    signal.reason instanceof ScanTransportClosedError
-  )
-    throw signal.reason;
-  const message = scanDir
-    ? `Codex Security scan was interrupted; partial output remains at ${scanDir}.`
-    : "Codex Security scan was interrupted during preparation.";
-  throw new ScanInterruptedError(message, scanDir, { cause: signal.reason });
 }
 
 function isCancellationDerivedFailure(
