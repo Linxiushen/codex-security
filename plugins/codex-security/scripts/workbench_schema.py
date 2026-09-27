@@ -898,10 +898,10 @@ MIGRATIONS = (
         JOIN finding_severity_assessments AS assessment ON assessment.finding_id = selected.value
         WHERE assessment.rubric_sha256 IS classification.rubric_sha256
           AND assessment.knowledge_base_sha256 IS classification.knowledge_base_sha256
-          AND NOT EXISTS (
+          AND EXISTS (
               SELECT 1 FROM finding_occurrences AS occurrence
               WHERE occurrence.id = assessment.occurrence_id
-                AND occurrence.scan_id != classification.scan_id
+                AND occurrence.scan_id = classification.scan_id
           );
         """,
     ),

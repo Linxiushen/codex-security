@@ -331,7 +331,7 @@ test.each(["same", "different"])(
   },
 );
 
-test("migration preserves available legacy assessments before another scan replaces the cache", async () => {
+test("migration leaves unindexed legacy assessments incomplete until reclassified", async () => {
   const first = await fixture();
   const second = await fixture("scan_example_002");
   const environment = first.environment;
@@ -357,15 +357,19 @@ test("migration preserves available legacy assessments before another scan repla
     ),
   ).toEqual([]);
   await classifyScanDirectorySeverity(second.scanDirectory, { environment });
-  expect(
-    await readScanSeverityClassification(
+  await expect(
+    readScanSeverityClassification(
       first.scanDirectory,
       scanId,
       first.findings,
       undefined,
       environment,
     ),
-  ).toEqual(classification);
+  ).rejects.toThrow("incomplete");
+  expect(
+    (await classifyScanDirectorySeverity(first.scanDirectory, { environment }))
+      .assessments,
+  ).toEqual(classification.assessments);
   expect(
     await query(
       environment,

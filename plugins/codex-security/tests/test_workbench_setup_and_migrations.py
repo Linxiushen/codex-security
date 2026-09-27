@@ -470,6 +470,73 @@ def test_comparison_indexes_upgrade_without_skipping_findings_migrations(
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+@pytest.mark.parametrize("indexed", [False, True])
+def test_severity_migration_only_copies_assessments_with_matching_scan_occurrences(
+    indexed: bool,
+) -> None:
+    namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
+    previous = tuple(item for item in namespace["MIGRATIONS"] if item[0] < 42)
+    timestamp = "2026-09-01T00:00:00Z"
+    with sqlite3.connect(":memory:") as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        namespace["apply_schema_migrations"](
+            connection, previous, namespace["now"], namespace["backfill_security_targets"]
+        )
+        connection.execute(
+            "INSERT INTO workspaces (id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("workspace", timestamp, timestamp),
+        )
+        for scan_id in ("first-scan", "second-scan"):
+            connection.execute(
+                """INSERT INTO scans (
+                    id, workspace_id, target_path, target_revision, scope, mode, scan_dir,
+                    status, phase, started_at, created_at, updated_at
+                ) VALUES (?, 'workspace', '/target', 'revision', '.', 'standard', ?,
+                    'complete', 'reporting', ?, ?, ?)""",
+                (scan_id, f"/scans/{scan_id}", timestamp, timestamp, timestamp),
+            )
+            connection.execute(
+                """INSERT INTO scan_severity_classifications
+                    (scan_id, finding_ids_json, assessed_at) VALUES (?, '["finding"]', ?)""",
+                (scan_id, timestamp),
+            )
+        connection.execute(
+            """INSERT INTO findings
+                (id, fingerprint, rule_id, identity_anchor, created_at, updated_at)
+                VALUES ('finding', 'fingerprint', 'rule', 'anchor', ?, ?)""",
+            (timestamp, timestamp),
+        )
+        connection.execute(
+            """INSERT INTO finding_severity_assessments
+                (finding_id, occurrence_id, input_sha256, assessed_at, source, decision,
+                    level, rationale)
+                VALUES ('finding', 'second-occurrence', 'digest', ?, 'existing-severity',
+                    'assessed', 'high', 'Saved severity')""",
+            (timestamp,),
+        )
+        if indexed:
+            connection.execute(
+                """INSERT INTO finding_occurrences
+                    (id, finding_id, scan_id, title, summary, severity, confidence,
+                        remediation, created_at)
+                    VALUES ('second-occurrence', 'finding', 'second-scan', 'Title', 'Summary',
+                        'high', 'high', 'Remediation', ?)""",
+                (timestamp,),
+            )
+
+        namespace["apply_migrations"](connection)
+        namespace["apply_migrations"](connection)
+
+        migrated = connection.execute(
+            "SELECT scan_id, occurrence_id FROM scan_severity_assessments"
+        ).fetchall()
+        assert [tuple(row) for row in migrated] == (
+            [("second-scan", "second-occurrence")] if indexed else []
+        )
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
 def test_workbench_backfills_repository_targets_only_during_migration() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="codex_security_workbench_db")
     apply_migrations = namespace["apply_migrations"]
