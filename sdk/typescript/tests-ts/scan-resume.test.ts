@@ -713,7 +713,7 @@ test.each([
         accounting === "legacy-current" ? f.threadId : randomUUID();
       checkpoint.legacy = {
         discoveryRuns: 1,
-        coverage: {},
+        coverage: semanticCoverage(),
         originThreadId: legacyThreadId,
         ...(accounting === "legacy-saved"
           ? { cost: cost(2_000, 200) }
