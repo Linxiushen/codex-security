@@ -1152,6 +1152,13 @@ def complete_budget_exhausted_scan(
             raise SystemExit("Deep Scan has not exceeded its configured cost limit.")
         scan_history.require_composition_complete(connection, scan)
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        manifest = read_json_object(artifact_path(scan_dir, "scan-manifest.json", required=True))
+        manifest_scan = manifest.get("scan", {})
+        if manifest_scan.get("sealedAt") is not None or manifest_scan.get("artifacts") not in (
+            None,
+            [],
+        ):
+            raise SystemExit("Budget-exhausted scan cannot replace an already sealed scan draft.")
         warning = optional_text(args.message, maximum=2400)
         if warning is None:
             warning = (

@@ -263,9 +263,7 @@ export async function runDeepScans(
         if (
           recoverOutcomes &&
           (recoveredSuccess ||
-            (!pass.completed &&
-              !state.mergedScanIds.includes(record.scanId))) &&
-          state.consecutiveErrors < settings.stopAfterConsecutiveErrors
+            (!pass.completed && !state.mergedScanIds.includes(record.scanId)))
         ) {
           state.consecutiveErrors = 0;
           recoveredSuccess = true;
@@ -395,8 +393,11 @@ export async function runDeepScans(
     };
     state.mergeFailures = 0;
     state.mergedScanIds.push(...pending.map((result) => result.scanId));
-    state.noNewStreak =
-      merged.newFindings > 0 ? 0 : state.noNewStreak + pending.length;
+    const novelPasses = new Set(merged.newFindingScanIds);
+    for (const pass of pending)
+      state.noNewStreak = novelPasses.has(pass.scanId)
+        ? 0
+        : state.noNewStreak + 1;
     await save();
     await input.publish(state.aggregate);
   };
@@ -466,8 +467,13 @@ export async function runDeepScans(
             }
             pass.failed = true;
             state.consecutiveErrors += 1;
-            if (state.consecutiveErrors >= settings.stopAfterConsecutiveErrors)
+            if (
+              state.consecutiveErrors >= settings.stopAfterConsecutiveErrors
+            ) {
+              // Persist the stop decision in the same checkpoint as its counter.
+              state.terminalReason = "failed";
               externalStop.abort(consecutiveErrorLimit);
+            }
             await save();
             return;
           }
@@ -575,15 +581,17 @@ export async function runDeepScans(
   } catch (error) {
     if (signal.reason instanceof ScanTransportClosedError) throw error;
     state.terminalReason =
-      signal.reason instanceof ScanCostLimitExceededError
-        ? "capped"
-        : executionSignal.aborted &&
-            executionSignal.reason !== consecutiveErrorLimit &&
-            !(executionSignal.reason instanceof ScanCostTrackingError) &&
-            !(executionSignal.reason instanceof ScanPermissionError) &&
-            !isCodexCybersecurityPolicyRefusal(executionSignal.reason)
-          ? "canceled"
-          : "failed";
+      externalStop.signal.reason === consecutiveErrorLimit
+        ? "failed"
+        : signal.reason instanceof ScanCostLimitExceededError
+          ? "capped"
+          : executionSignal.aborted &&
+              executionSignal.reason !== consecutiveErrorLimit &&
+              !(executionSignal.reason instanceof ScanCostTrackingError) &&
+              !(executionSignal.reason instanceof ScanPermissionError) &&
+              !isCodexCybersecurityPolicyRefusal(executionSignal.reason)
+            ? "canceled"
+            : "failed";
     if (state.aggregate !== null) {
       state.aggregate = {
         ...state.aggregate,

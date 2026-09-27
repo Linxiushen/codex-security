@@ -2445,7 +2445,9 @@ async function nativeScanTerminalResult(
   if (status === "complete") return nativeScanCompletedResult(scan);
   const retained =
     status === "canceled" || status === "failed"
-      ? await finalizeNativeStoppedScan(scan.scanId, nativeScans)
+      ? await finalizeNativeStoppedScan(scan.scanId, nativeScans, {
+          message: scan.failureMessage ?? undefined,
+        })
       : undefined;
   if (status === "canceled") {
     const instructions = `Deep Scan ${scan.scanId} was canceled. Saved findings and pending candidates remain available in the scan's retained results. Do not start additional scan work or claim complete coverage.`;

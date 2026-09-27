@@ -1503,6 +1503,10 @@ process.exit(1);
       handoffClaimToken,
     ]);
     assert.equal(completed.scan.progress.status, "complete");
+    if (completed.scan.usage !== undefined)
+      expectedResult.usage = completed.scan.usage;
+    if (completed.scan.cost !== undefined)
+      expectedResult.cost = completed.scan.cost;
     const originalDraft = await snapshotScanDraft(scanDir);
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
@@ -1581,6 +1585,42 @@ process.exit(1);
         ownerThread,
       ],
     );
+    const childRelativeDirectory = "artifacts/deep-scan/passes/pass-1";
+    const childDirectory = path.join(
+      canceledScan.scanDir,
+      childRelativeDirectory,
+    );
+    await mkdir(childDirectory, { recursive: true, mode: 0o700 });
+    const child = runWorkbenchFixture(runtimeLabel, environment, [
+      "register-cli-scan",
+      "--repository",
+      canceledRepo,
+      "--scan-dir",
+      childDirectory,
+      "--parent-scan-id",
+      canceledScan.scanId,
+      "--recipe-json",
+      JSON.stringify(privateScanRecipe(canceledRepo, "standard")),
+    ]);
+    runWorkbenchFixture(
+      runtimeLabel,
+      environment,
+      [
+        "save-scan-artifact",
+        "--scan-id",
+        canceledScan.scanId,
+        "--claim-token",
+        canceledScan.handoffClaimToken,
+        "--artifact-path",
+        "artifacts/deep-scan/checkpoint.json",
+      ],
+      {
+        version: 2,
+        passes: [{ directory: childRelativeDirectory, scanId: child.scanId }],
+        mergedScanIds: [],
+        aggregate: null,
+      },
+    );
     runWorkbenchFixture(runtimeLabel, environment, [
       "cancel-scan",
       "--scan-id",
@@ -1621,6 +1661,15 @@ process.exit(1);
         canceledScan.scanId,
       ]).scan.progress.status,
       "canceled",
+    );
+    assert.equal(
+      runWorkbenchFixture(runtimeLabel, environment, [
+        "get-scan",
+        "--scan-id",
+        child.scanId,
+      ]).scan.progress.status,
+      "failed",
+      `${runtimeLabel}: terminal rejoin finishes the deferred child stop`,
     );
     await assert.rejects(readFile(invocationPath), { code: "ENOENT" });
   } finally {

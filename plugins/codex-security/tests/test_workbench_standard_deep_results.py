@@ -1935,6 +1935,81 @@ def test_legacy_resume_imports_accepted_progress_once(tmp_path: Path) -> None:
     assert all(path.read_bytes() == contents for path, contents in snapshots.items())
 
 
+@pytest.mark.parametrize(
+    ("generation", "status", "error_message", "dispatched", "expected"),
+    [
+        (1, "queued", None, 1, 0),
+        (2, "running", None, 1, 0),
+        (1, "canceled", None, 1, 0),
+        (2, "canceled", "coordinator_shutdown: mcp_transport_closed", 1, 0),
+        (2, "canceled", None, 1, 1),
+        (2, "failed", "Worker failed.", 1, 1),
+        (2, "canceled", "Worker budget exceeded.", 1, 1),
+        (
+            2,
+            "canceled",
+            "coordinator_shutdown_recovered: replacement attempt required",
+            0,
+            0,
+        ),
+    ],
+    ids=[
+        "queued",
+        "running",
+        "legacy-shutdown",
+        "transport-shutdown",
+        "unmarked-cancel",
+        "failed",
+        "budget-stop",
+        "already-refunded",
+    ],
+)
+def test_legacy_resume_refunds_abandoned_discovery_attempts(
+    tmp_path: Path,
+    generation: int,
+    status: str,
+    error_message: str | None,
+    dispatched: int,
+    expected: int,
+) -> None:
+    state, _, _, scan_dir, scan_id = deep_scan_fixture(tmp_path)
+    prompt, directory, _ = worker_paths(scan_dir, "abandoned")
+    worker_id = str(uuid.uuid4())
+    seed_legacy_worker(
+        state,
+        scan_id,
+        worker_id,
+        kind="discovery",
+        status=status,
+        prompt=prompt,
+        directory=directory,
+    )
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE deep_scan_runs SET discovery_runs_dispatched = ?, max_discovery_runs = 1, "
+            "coordinator_generation = ?, updated_at = '2000-01-01T00:00:00Z' WHERE scan_id = ?",
+            (dispatched, generation, scan_id),
+        )
+        connection.execute(
+            "UPDATE deep_scan_workers SET error_message = ? WHERE id = ?",
+            (error_message, worker_id),
+        )
+
+    run_workbench(state, "get-cli-scan-resume", "--migrate", "--scan-id", scan_id)
+
+    checkpoint_path = scan_dir / "artifacts/deep-scan/checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    assert checkpoint["legacy"]["discoveryRuns"] == expected
+    assert checkpoint["aggregate"]["findings"] == []
+    assert any(
+        item.get("id") == f"legacy-{worker_id}"
+        for item in checkpoint["legacy"]["coverage"]["deferred"]
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+    run_workbench(state, "get-cli-scan-resume", "--migrate", "--scan-id", scan_id)
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+
+
 @pytest.mark.parametrize("merge_state", ["buffered", "merging"])
 def test_legacy_resume_at_discovery_cap_retains_unmerged_results(
     tmp_path: Path, merge_state: str

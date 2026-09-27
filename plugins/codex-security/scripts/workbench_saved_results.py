@@ -61,10 +61,6 @@ _PUBLICATION_FOLLOW_UP_WARNING = (
 )
 
 
-class ReportEvidenceCollision(ContractError):
-    """A retained finding report cannot be projected without overwriting evidence."""
-
-
 _RESERVED_ARTIFACT_PATHS = json.loads(
     Path(__file__).with_name("reserved_artifact_paths.json").read_text(encoding="utf-8")
 )
@@ -1269,6 +1265,23 @@ def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
             }
         )
     coverage["deferred"].extend({"reason": warning} for warning in warnings)
+    # The retired coordinator refunded these abandoned attempts when its lease expired.
+    # Preserve that budget so migration can dispatch their replacements.
+    interrupted_discoveries = sum(
+        worker["kind"] == "discovery"
+        and (
+            worker["status"] in {"queued", "running"}
+            or (
+                worker["status"] == "canceled"
+                and (
+                    (worker["error_message"] or "").startswith("coordinator_shutdown:")
+                    or (run["coordinator_generation"] == 1 and worker["error_message"] is None)
+                )
+            )
+        )
+        for worker in workers
+        if run["status"] == "running"
+    )
     checkpoint = {
         "version": 2,
         "startedAt": run["created_at"],
@@ -1280,7 +1293,7 @@ def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
         "mergeFailures": merge_failures,
         "legacy": {
             "originThreadId": scan["continuation_thread_id"] or scan["deep_scan_owner_thread_id"],
-            "discoveryRuns": run["discovery_runs_dispatched"],
+            "discoveryRuns": run["discovery_runs_dispatched"] - interrupted_discoveries,
             "coverage": copy.deepcopy(coverage),
             **(
                 {"cost": cost}
@@ -1348,6 +1361,11 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
         )
     ]
     prefix = child_dir.relative_to(scan_dir).as_posix()
+    reserved_slugs = {
+        f"{child['id']}-{Path(finding['writeup']['reportPath']).parent.name}".upper()
+        for finding in findings["findings"]
+        if isinstance(finding.get("writeup"), dict)
+    }
     for index, finding in enumerate(findings["findings"]):
         original = copy.deepcopy(finding)
         source_id = f"{child['id']}:{index}"
@@ -1365,25 +1383,29 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
         writeup = finding.get("writeup")
         if isinstance(writeup, dict):
             report = Path(writeup["reportPath"])
-            slug = f"{child['id']}-{report.parent.name}"
+            source_directory = child_dir / report.parent
+            source_names = {
+                unicodedata.normalize("NFC", path.name).upper()
+                for path in source_directory.iterdir()
+            }
+            base_slug = f"{child['id']}-{report.parent.name}"
+            slug = base_slug
+            suffix = 2
+            while f"{slug}.md".upper() in source_names or (
+                slug != base_slug and slug.upper() in reserved_slugs
+            ):
+                slug = f"{base_slug}-{suffix}"
+                suffix += 1
             writeup["reportPath"] = f"findings/{slug}/{slug}.md"
-            for path in (child_dir / report.parent).rglob("*"):
+            for path in source_directory.rglob("*"):
+                if path.is_dir():
+                    continue
                 relative = path.relative_to(child_dir).as_posix()
                 destination = (
                     writeup["reportPath"]
                     if relative == report.as_posix()
-                    else f"findings/{slug}/{path.relative_to(child_dir / report.parent).as_posix()}"
+                    else f"findings/{slug}/{path.relative_to(source_directory).as_posix()}"
                 )
-                if (
-                    relative != report.as_posix()
-                    and unicodedata.normalize("NFC", destination).upper()
-                    == unicodedata.normalize("NFC", writeup["reportPath"]).upper()
-                ):
-                    raise ReportEvidenceCollision(
-                        f"Saved finding evidence conflicts with its projected report: {relative}."
-                    )
-                if path.is_dir():
-                    continue
                 with os.fdopen(
                     open_scan_local_file_descriptor(
                         child_dir,
@@ -1433,10 +1455,6 @@ def save_composed_checkpoint(
             continue
         try:
             draft = _stopped_child_draft(db, child, scan_dir)
-        except ReportEvidenceCollision:
-            # Do not seal a parent that silently omits an otherwise valid child.
-            # The stop finalizer retains the source and reports publication recovery.
-            raise
         except (ContractError, OSError, SystemExit, ValueError):
             continue
         if draft is None:

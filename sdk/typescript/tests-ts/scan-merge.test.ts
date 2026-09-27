@@ -366,13 +366,16 @@ describe("local scan merging", () => {
     expect(
       (published.findings["findings"] as JsonObject[]).map(scanFindingIdentity),
     ).toEqual(identities);
-    expect(() =>
-      merge(
-        submission([...next.draft.findings, ...previous.findings]),
-        [next],
-        previous,
-      ),
-    ).toThrow("previously accepted finding identity");
+    const reordered = merge(
+      submission([...next.draft.findings, ...previous.findings]),
+      [next],
+      previous,
+    );
+    expect(reordered.aggregate.findings.map(scanFindingIdentity)).toEqual(
+      [...identities].reverse(),
+    );
+    expect(reordered.newFindings).toBe(1);
+    expect(reordered.newFindingScanIds).toEqual([next.scanId]);
   });
 
   test("projects writeups and PoC bytes without changing source evidence or repository paths", async () => {
@@ -428,6 +431,90 @@ describe("local scan merging", () => {
     );
   });
 
+  test("credits a new issue to its earliest source pass regardless of output or reference order", () => {
+    const first = child("first");
+    const second = child("second");
+    const third = child("third", [finding("another-issue")]);
+    const shared = finding("shared", {
+      provenance: {
+        source: "local_plugin",
+        sourceFindingIds: ["second:0", "first:0"],
+      },
+    });
+    const duplicateOnly = merge(submission([shared]), [first, second], null);
+    expect(duplicateOnly.newFindings).toBe(1);
+    expect(duplicateOnly.newFindingScanIds).toEqual(["first"]);
+
+    const result = merge(
+      submission([third.draft.findings[0]!, shared]),
+      [first, second, third],
+      null,
+    );
+    expect(result.newFindings).toBe(2);
+    expect(result.newFindingScanIds).toEqual(["first", "third"]);
+    const rediscovered = child("fourth");
+    const retained = structuredClone(result.aggregate.findings);
+    (provenance(retained[1]!)["sourceFindingIds"] as string[]).push("fourth:0");
+    const repeated = merge(
+      submission(retained),
+      [rediscovered],
+      result.aggregate,
+    );
+    expect(repeated.newFindings).toBe(0);
+    expect(repeated.newFindingScanIds).toEqual([]);
+  });
+
+  test("keeps reports and evidence separate when renamed report paths collide", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "scan-merge-collision-"));
+    directories.push(directory);
+    const input = child("first", [
+      finding("issue", { writeup: { reportPath: "findings/issue/issue.md" } }),
+      finding("issue-3", {
+        writeup: { reportPath: "findings/issue-3/issue-3.md" },
+      }),
+    ]);
+    input.scanDir = directory;
+    const files = {
+      "findings/issue/issue.md":
+        "# Original report\n[payload](first-issue.md)\n",
+      "findings/issue/first-issue.md":
+        "Evidence named like the projected report.",
+      "findings/issue/first-issue-2.md/payload.bin": "Nested evidence.",
+      "findings/issue-3/issue-3.md": "# Another report\n",
+    };
+    for (const [path, text] of Object.entries(files)) {
+      await mkdir(join(directory, path, ".."), { recursive: true });
+      await writeFile(join(directory, path), text);
+    }
+    const output = join(directory, "projected");
+    const project = () =>
+      projectScanMergeWriteups(input, {
+        async restore(path, bytes) {
+          await mkdir(join(output, path, ".."), { recursive: true });
+          await writeFile(join(output, path), bytes);
+        },
+      });
+    const first = await project();
+    const repeated = await project();
+    expect(repeated).toEqual(first);
+    expect(first.draft.findings.map((entry) => entry["writeup"])).toEqual([
+      { reportPath: "findings/first-issue-4/first-issue-4.md" },
+      { reportPath: "findings/first-issue-3/first-issue-3.md" },
+    ]);
+    const expected = {
+      "findings/first-issue-4/first-issue-4.md":
+        files["findings/issue/issue.md"],
+      "findings/first-issue-4/first-issue.md":
+        files["findings/issue/first-issue.md"],
+      "findings/first-issue-4/first-issue-2.md/payload.bin":
+        files["findings/issue/first-issue-2.md/payload.bin"],
+      "findings/first-issue-3/first-issue-3.md":
+        files["findings/issue-3/issue-3.md"],
+    };
+    for (const [path, contents] of Object.entries(expected))
+      expect(await readFile(join(output, path), "utf8")).toBe(contents);
+  });
+
   test("rejects writeup evidence that links outside the completed scan", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "scan-merge-linked-writeup-"),
@@ -466,7 +553,11 @@ describe("local scan merging", () => {
     const threatModel = { summary: "Public and local entrypoints." };
     expect(
       merge(submission([], { threatModel }), [first, second], null),
-    ).toEqual({ aggregate: submission([], { threatModel }), newFindings: 0 });
+    ).toEqual({
+      aggregate: submission([], { threatModel }),
+      newFindings: 0,
+      newFindingScanIds: [],
+    });
   });
 
   test("combines independent coverage IDs and receipt paths without mutating inputs", () => {
@@ -733,18 +824,22 @@ test.each(["child-issue.md", "CHILD-ISSUE.MD"])(
     ]);
     input.scanDir = directory;
     const writes = new Map<string, Uint8Array>();
-    await expect(
-      projectScanMergeWriteups(input, {
-        async restore(path, bytes) {
-          writes.set(path, bytes);
-        },
-      }),
-    ).rejects.toThrow("conflicts with its projected report");
+    const projected = await projectScanMergeWriteups(input, {
+      async restore(path, bytes) {
+        writes.set(path, bytes);
+      },
+    });
+    expect(projected.draft.findings[0]!["writeup"]).toEqual({
+      reportPath: "findings/child-issue-2/child-issue-2.md",
+    });
     expect(
       Buffer.from(
-        writes.get("findings/child-issue/child-issue.md")!,
+        writes.get("findings/child-issue-2/child-issue-2.md")!,
       ).toString(),
     ).toBe("Original report");
+    expect(
+      Buffer.from(writes.get(`findings/child-issue-2/${name}`)!).toString(),
+    ).toBe("Supporting evidence");
     expect(
       await readFile(join(directory, "findings/issue", name), "utf8"),
     ).toBe("Supporting evidence");

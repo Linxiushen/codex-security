@@ -169,7 +169,7 @@ describe("semantic scan comparison", () => {
     );
   });
 
-  test("preserves inherited denies at the read-only matcher process boundary", async () => {
+  test("retains inherited read restrictions without writes at the matcher process boundary", async () => {
     const home = await mkdtemp(
       join(tmpdir(), "codex-security-matcher-permissions-"),
     );
@@ -195,8 +195,13 @@ process.exit(0);
     const nodeExecutable = execFileSync("node", ["-p", "process.execPath"], {
       encoding: "utf8",
     }).trim();
-    const inheritedPermissions = {
+    const inheritedPermissions: {
+      filesystem: Record<string, string | number | Record<string, string>>;
+      network: { enabled: boolean };
+    } = {
       filesystem: {
+        ":workspace_roots": "write",
+        [join(home, "scoped")]: { ".": "write", private: "deny" },
         [join(home, "literal.[private]")]: { ".": "deny" },
         [join(home, "**", "*.secret")]: "deny",
         glob_scan_max_depth: 3,
@@ -267,7 +272,11 @@ process.exit(0);
         permissions: {
           codex_security_comparison: {
             extends: ":read-only",
-            filesystem: inheritedPermissions.filesystem,
+            filesystem: {
+              ...inheritedPermissions.filesystem,
+              ":workspace_roots": "read",
+              [join(home, "scoped")]: { ".": "read", private: "deny" },
+            },
             network: { enabled: false },
           },
         },
@@ -289,6 +298,11 @@ process.exit(0);
       expect(
         ordinary!.some((value) => value.includes("codex_security_comparison")),
       ).toBe(false);
+      expect(inheritedPermissions.filesystem[":workspace_roots"]).toBe("write");
+      expect(inheritedPermissions.filesystem[join(home, "scoped")]).toEqual({
+        ".": "write",
+        private: "deny",
+      });
     } finally {
       startThread.mockRestore();
     }

@@ -59,6 +59,7 @@ type PreparedNativeScan = { client: NativeClient; options: ScanOptions };
 
 /** Native tools join the same ordinary scan operation until it finishes. */
 export class NativeScanHost {
+  private closed = false;
   private readonly active = new Map<
     string,
     {
@@ -70,6 +71,10 @@ export class NativeScanHost {
   constructor(private readonly prepare = prepareNativeScan) {}
 
   run(input: NativeScanInput, waiterSignal?: AbortSignal): Promise<ScanResult> {
+    if (this.closed)
+      return Promise.reject(
+        new ScanTransportClosedError("mcp_transport_closed"),
+      );
     let active = this.active.get(input.scan.scanId);
     if (!active) {
       const controller = new AbortController();
@@ -110,6 +115,7 @@ export class NativeScanHost {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     const active = [...this.active.values()];
     for (const run of active)
       run.controller.abort(

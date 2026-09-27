@@ -277,6 +277,9 @@ for (const status of ["canceled", "failed"]) {
       scanDir: "/synthetic/scan",
       handoffClaimToken: "synthetic-claim",
       progress: { status },
+      failureMessage: status === "failed" ? "Synthetic scan failure." : null,
+      usage: { inputTokens: 100, outputTokens: 10 },
+      cost: { estimatedUsd: 0.25 },
       warnings: ["Synthetic retained publication warning"],
     };
     const server = serverFor({
@@ -299,8 +302,9 @@ for (const status of ["canceled", "failed"]) {
       async run() {
         assert.fail("Terminal scans cannot launch a runner");
       },
-      async cancel(id) {
+      async cancel(id, reason) {
         assert.equal(id, scan.scanId);
+        assert.equal(reason, scan.failureMessage ?? undefined);
         events.push("drain");
       },
     });
@@ -311,7 +315,11 @@ for (const status of ["canceled", "failed"]) {
         nativeMeta,
       );
       assert.equal(result.isError === true, status === "failed");
-      assert.deepEqual(result.structuredContent.warnings, scan.warnings);
+      assert.equal(result.structuredContent.status, status);
+      if (status === "failed")
+        assert.match(result.content[0].text, /Synthetic scan failure/);
+      for (const key of ["usage", "cost", "warnings"])
+        assert.deepEqual(result.structuredContent[key], scan[key]);
     }
     assert.deepEqual(
       events,

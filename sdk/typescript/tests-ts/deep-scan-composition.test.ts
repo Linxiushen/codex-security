@@ -15,6 +15,7 @@ import * as timers from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import type { ScanOptions } from "../src/api.js";
+import { ScanCostLimitExceededError } from "../src/errors.js";
 import { estimateScanCost, type ScanCost } from "../src/cost.js";
 import type { JsonObject as WorkbenchJsonObject } from "../src/config.js";
 import {
@@ -354,6 +355,53 @@ describe("ordinary scan composition", () => {
     ).toBe(true);
   });
 
+  test.each([false, true])(
+    "counts clean passes after a novel finding in the same batch (repeated finding: %p)",
+    async (repeated) => {
+      const h = await harness({ workers: 3, stopAfterNoNew: 2 });
+      h.setRun(async (options) =>
+        result(
+          options.resumeScanId!,
+          options.outputDir!,
+          options.outputDir!.endsWith("pass-1") || repeated
+            ? "supported-issue"
+            : undefined,
+        ),
+      );
+      const state = await runDeepScans(h.input);
+      expect(h.calls).toHaveLength(3);
+      expect(h.mergeInputs).toEqual([3]);
+      expect(state.noNewStreak).toBe(2);
+      expect(state.terminalReason).toBe("saturated");
+      expect(state.aggregate!.findings).toHaveLength(1);
+    },
+  );
+
+  test.each(["failed", "canceled"] as const)(
+    "does not complete a %s checkpoint when its database transition was interrupted",
+    async (terminalReason) => {
+      const h = await harness();
+      const checkpoint: DeepScanCheckpoint = {
+        version: 2,
+        startedAt: h.input.startedAt,
+        passes: [],
+        mergedScanIds: [],
+        aggregate: { scanId: h.input.scanId, findings: [], coverage: {} },
+        noNewStreak: 0,
+        consecutiveErrors: 0,
+        terminalReason,
+      };
+      await h.seed(checkpoint);
+      await expect(runDeepScans(h.input)).rejects.toThrow(
+        `saved Deep Scan is ${terminalReason}`,
+      );
+      expect(h.calls).toEqual([]);
+      expect(h.mergeInputs).toEqual([]);
+      expect(h.published).toEqual([]);
+      expect(await h.checkpoint()).toEqual(checkpoint);
+    },
+  );
+
   test("resets no-new streak on a novel stable identity", async () => {
     const h = await harness({ stopAfterNoNew: 2 });
     let pass = 0;
@@ -485,8 +533,12 @@ describe("ordinary scan composition", () => {
         expect(h.published).toEqual([]);
         expect(await h.checkpoint()).toMatchObject({
           consecutiveErrors,
-          mergeFailures:
-            discoveryLimit || fatalMergeFailure ? priorFailures : 3,
+          ...(kind === "failed discovery"
+            ? {}
+            : {
+                mergeFailures:
+                  discoveryLimit || fatalMergeFailure ? priorFailures : 3,
+              }),
           noNewStreak: 0,
           mergedScanIds: [],
           terminalReason: "failed",
@@ -858,15 +910,23 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test.each([
-    [false, false],
-    [true, false],
-    [false, true],
-    [true, true],
-  ])(
-    "recovers terminal outcomes in completion order across repeated resumes (success last: %p, failure saved: %p)",
-    async (successLast, failureSaved) => {
-      const h = await harness({ maxDiscoveryRuns: 3 });
+  test.each(
+    [2, 3].flatMap((limit) =>
+      [false, true].flatMap((successLast) =>
+        [false, true].map((failureSaved) => ({
+          limit,
+          successLast,
+          failureSaved,
+        })),
+      ),
+    ),
+  )(
+    "recovers terminal outcomes in completion order across repeated resumes (%j)",
+    async ({ limit, successLast, failureSaved }) => {
+      const h = await harness({
+        maxDiscoveryRuns: 3,
+        stopAfterConsecutiveErrors: limit,
+      });
       const directory = "artifacts/deep-scan/passes/pass-2";
       const scanDir = join(h.input.scanDir, directory);
       await mkdir(dirname(scanDir), { recursive: true });
@@ -942,47 +1002,132 @@ describe("ordinary scan composition", () => {
     },
   );
 
-  test("keeps the consecutive error limit when a sibling finishes after it", async () => {
+  test.each(["none", "cancel", "cost"] as const)(
+    "keeps the consecutive error limit when a sibling finishes after it (late stop: %s)",
+    async (lateStop) => {
+      retryDelay = spyOn(timers, "setTimeout").mockImplementation(
+        async <T>(_delay?: number, value?: T): Promise<T> => value as T,
+      );
+      const h = await harness({ workers: 2, stopAfterConsecutiveErrors: 1 });
+      let releaseSibling!: () => void;
+      const thresholdReached = new Promise<void>((resolve) => {
+        releaseSibling = resolve;
+      });
+      const workbench = h.input.workbench;
+      h.input.workbench = async (args, input) => {
+        const result = await workbench(args, input);
+        if (
+          args[0] === "save-scan-artifact" &&
+          JSON.parse(input!).consecutiveErrors === 1
+        ) {
+          if (lateStop === "cancel")
+            h.controller.abort(new Error("Canceled after threshold."));
+          if (lateStop === "cost")
+            h.controller.abort(
+              new ScanCostLimitExceededError(
+                0.001,
+                estimateScanCost("gpt-6-astra", {
+                  input_tokens: 10000,
+                  output_tokens: 2000,
+                })!,
+                h.input.scanDir,
+              ),
+            );
+          releaseSibling();
+        }
+        return result;
+      };
+      let siblingSignal: AbortSignal | undefined;
+      h.setRun(async (options) => {
+        if (options.outputDir!.endsWith("pass-1"))
+          throw new Error("Discovery failed.");
+        siblingSignal = options.signal;
+        await thresholdReached;
+        return result(options.resumeScanId!, options.outputDir!);
+      });
+      await expect(runDeepScans(h.input)).rejects.toThrow(
+        "consecutive error limit",
+      );
+      expect(siblingSignal?.aborted).toBe(true);
+      expect(h.calls).toHaveLength(5);
+      expect(h.metrics().closed).toBe(2);
+      expect(h.mergeInputs).toEqual([]);
+      expect(h.published).toEqual([]);
+      expect(await h.checkpoint()).toMatchObject({
+        terminalReason: "failed",
+        consecutiveErrors: 1,
+        noNewStreak: 0,
+        mergedScanIds: [],
+      });
+    },
+  );
+
+  test("persists threshold failure before transport loss can admit a later sibling", async () => {
     retryDelay = spyOn(timers, "setTimeout").mockImplementation(
       async <T>(_delay?: number, value?: T): Promise<T> => value as T,
     );
-    const h = await harness({ workers: 2, stopAfterConsecutiveErrors: 1 });
-    let releaseSibling!: () => void;
-    const thresholdReached = new Promise<void>((resolve) => {
-      releaseSibling = resolve;
+    const h = await harness({
+      workers: 2,
+      maxDiscoveryRuns: 2,
+      stopAfterConsecutiveErrors: 1,
     });
+    const thresholdSaved = Promise.withResolvers<void>();
+    const transport = new ScanTransportClosedError(
+      "Transport stopped after threshold save.",
+    );
+    const createClient = h.input.createClient;
+    h.input.createClient = () => {
+      const client = createClient();
+      return {
+        ...client,
+        run(repository, options = {}) {
+          return client.run(repository, {
+            ...options,
+            ...(options.outputDir!.endsWith("pass-2")
+              ? { resumeScanId: exampleManifest.scan.id }
+              : {}),
+          });
+        },
+      };
+    };
     const workbench = h.input.workbench;
-    h.input.workbench = async (args, input) => {
-      const result = await workbench(args, input);
+    h.input.workbench = async (args, contents) => {
+      if (h.controller.signal.aborted) throw transport;
+      const response = await workbench(args, contents);
       if (
         args[0] === "save-scan-artifact" &&
-        JSON.parse(input!).consecutiveErrors === 1
-      )
-        releaseSibling();
-      return result;
+        JSON.parse(contents!).consecutiveErrors === 1
+      ) {
+        h.controller.abort(transport);
+        thresholdSaved.resolve();
+      }
+      return response;
     };
-    let siblingSignal: AbortSignal | undefined;
     h.setRun(async (options) => {
       if (options.outputDir!.endsWith("pass-1"))
         throw new Error("Discovery failed.");
-      siblingSignal = options.signal;
-      await thresholdReached;
+      await thresholdSaved.promise;
+      await cp(example, options.outputDir!, { recursive: true });
       return result(options.resumeScanId!, options.outputDir!);
     });
     await expect(runDeepScans(h.input)).rejects.toThrow(
       "consecutive error limit",
     );
-    expect(siblingSignal?.aborted).toBe(true);
+    expect(h.records.get(exampleManifest.scan.id)!.progress.status).toBe(
+      "complete",
+    );
+    const checkpointPath = join(h.input.scanDir, DEEP_SCAN_CHECKPOINT);
+    const saved = await readFile(checkpointPath);
+    expect(JSON.parse(saved.toString()).consecutiveErrors).toBe(1);
+    h.input.signal = new AbortController().signal;
+    h.input.workbench = workbench;
+    await expect(runDeepScans(h.input)).rejects.toThrow(
+      "saved Deep Scan is failed",
+    );
+    expect(await readFile(checkpointPath)).toEqual(saved);
     expect(h.calls).toHaveLength(5);
-    expect(h.metrics().closed).toBe(2);
     expect(h.mergeInputs).toEqual([]);
     expect(h.published).toEqual([]);
-    expect(await h.checkpoint()).toMatchObject({
-      terminalReason: "failed",
-      consecutiveErrors: 1,
-      noNewStreak: 0,
-      mergedScanIds: [],
-    });
   });
 
   test.each([false, true])(

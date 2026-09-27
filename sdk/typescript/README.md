@@ -786,9 +786,10 @@ in each batch, and `--subagents` sets subagents per scan. Each batch finishes an
 merges before the next starts. With `--workers 1`, each scan is merged immediately.
 
 `--stop-after-no-new` stops after that many successfully merged scans without new
-issues. A batch with any new issue resets this count; otherwise, the count grows
-by the number of successful scans in the batch. The scan checks this threshold
-after each merge, so a batch can pass the threshold. Failures do not count as
+issues. Within each batch, scans count in their original order, and each new
+issue is credited to the first scan that found it. A scan credited with a new
+issue resets the count; other successful scans increase it. The scan checks this
+threshold after each batch merge, so a batch can pass the threshold. Failures do not count as
 no-new results, and retries do not consume additional discovery runs.
 `--max-discovery-runs` and `--max-time-hours` cap discovery runs and duration.
 SDK equivalents:

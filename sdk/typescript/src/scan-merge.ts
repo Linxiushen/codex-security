@@ -31,6 +31,13 @@ export interface ScanMergeInput {
   sourceFindings: JsonObject[];
 }
 
+interface ScanMergeResult {
+  aggregate: ScanAggregate;
+  newFindings: number;
+  /** Each novel issue belongs to the earliest input that discovered it. */
+  newFindingScanIds: string[];
+}
+
 /** The normal scan lifecycle has already validated and sealed these documents. */
 export function scanMergeInput(
   result: Pick<ScanResult, "manifest" | "findings" | "coverage" | "scanDir">,
@@ -131,19 +138,19 @@ export async function projectScanMergeWriteups(
       ),
     );
   };
-  const startReport = async (
-    source: string,
-    destination: string,
-    key: string,
-  ) => {
-    const bytes = await readScanFile(
-      input.scanDir,
-      source,
-      "Scan merge writeup",
-      signal,
-    );
-    track(key, writer.restore(destination, bytes));
-  };
+  const reportSlugs = new Map<string, string>();
+  const reservedSlugs = new Set(
+    projected.draft.findings.flatMap((finding) => {
+      const writeup = finding["writeup"] as { reportPath: string } | undefined;
+      return typeof writeup?.reportPath === "string"
+        ? [
+            collisionKey(
+              `${input.scanId}-${posix.basename(posix.dirname(writeup.reportPath))}`,
+            ),
+          ]
+        : [];
+    }),
+  );
   // Reuse only the current source of a destination, within this call. An
   // intervening report alias must finish overwriting the entire prior tree.
   const destinations = new Map<string, string>();
@@ -155,15 +162,48 @@ export async function projectScanMergeWriteups(
       if (failure !== undefined) break;
       const reportPath = writeup.reportPath;
       const sourceDirectory = posix.dirname(reportPath);
-      const slug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
-      const directoryKey = collisionKey(`findings/${slug}`);
-      const destination = `findings/${slug}/${slug}.md`;
-      const prior = destinations.get(directoryKey);
-      if (prior === reportPath) {
+      const baseSlug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
+      let slug = reportSlugs.get(reportPath) ?? baseSlug;
+      let directoryKey = collisionKey(`findings/${slug}`);
+      let destination = `findings/${slug}/${slug}.md`;
+      if (destinations.get(directoryKey) === reportPath) {
         writeup.reportPath = destination;
         continue;
       }
-      if (prior !== undefined) {
+      if (!(await ready(collisionKey(destination)))) break;
+      // Read the checked report before enumerating its directory. Hold its
+      // payload slot while selecting a name that cannot overwrite evidence.
+      const bytes = await readScanFile(
+        input.scanDir,
+        reportPath,
+        "Scan merge writeup",
+        signal,
+      );
+      const reportEntries = await readdir(
+        join(input.scanDir, sourceDirectory),
+        {
+          withFileTypes: true,
+        },
+      );
+      if (!reportSlugs.has(reportPath)) {
+        const evidenceNames = new Set(
+          reportEntries
+            .filter((entry) => entry.name !== posix.basename(reportPath))
+            .map((entry) => collisionKey(entry.name)),
+        );
+        let suffix = 2;
+        while (
+          evidenceNames.has(collisionKey(`${slug}.md`)) ||
+          (slug !== baseSlug && reservedSlugs.has(collisionKey(slug)))
+        ) {
+          slug = `${baseSlug}-${suffix++}`;
+        }
+        reportSlugs.set(reportPath, slug);
+        reservedSlugs.add(collisionKey(slug));
+        directoryKey = collisionKey(`findings/${slug}`);
+        destination = `findings/${slug}/${slug}.md`;
+      }
+      if (destinations.has(directoryKey)) {
         await Promise.all(
           [...running]
             .filter(([key]) => key.startsWith(`${directoryKey}/`))
@@ -172,25 +212,22 @@ export async function projectScanMergeWriteups(
       }
       const reportKey = collisionKey(destination);
       if (!(await ready(reportKey))) break;
-      // Validate and read the report before enumerating its directory. Its
-      // write can overlap independent evidence, but retains the first error
-      // position and participates in destination alias ordering.
-      await startReport(reportPath, destination, reportKey);
+      track(reportKey, writer.restore(destination, bytes));
       const pending = [sourceDirectory];
       while (pending.length > 0) {
         signal?.throwIfAborted();
         const directory = pending.pop()!;
-        for (const entry of await readdir(join(input.scanDir, directory), {
-          withFileTypes: true,
-        })) {
+        const entries =
+          directory === sourceDirectory
+            ? reportEntries
+            : await readdir(join(input.scanDir, directory), {
+                withFileTypes: true,
+              });
+        for (const entry of entries) {
           const path = posix.join(directory, entry.name);
           if (path === reportPath) continue;
           const evidenceDestination = `findings/${slug}/${posix.relative(sourceDirectory, path)}`;
           const key = collisionKey(evidenceDestination);
-          if (key === reportKey || key.startsWith(`${reportKey}/`))
-            throw new Error(
-              `Scan merge writeup evidence conflicts with its projected report: ${path}.`,
-            );
           if (entry.isDirectory()) {
             pending.push(path);
             continue;
@@ -225,7 +262,7 @@ export async function createScanMergeValidator(
     raw: unknown,
     inputs: readonly ScanMergeInput[],
     previous: ScanAggregate | null,
-  ) => { aggregate: ScanAggregate; newFindings: number }
+  ) => ScanMergeResult
 > {
   const [common, draft] = await Promise.all([
     readFile(
@@ -286,7 +323,7 @@ function reconcileScanMerge(
   raw: ScanAggregate,
   inputs: readonly ScanMergeInput[],
   previous: ScanAggregate | null,
-): { aggregate: ScanAggregate; newFindings: number } {
+): ScanMergeResult {
   // Only the finding and provenance containers are edited during reconciliation.
   // Detach the entire result once, after all preservation and attribution checks.
   const aggregate = {
@@ -296,7 +333,6 @@ function reconcileScanMerge(
         ...finding,
         provenance: { ...(finding["provenance"] as JsonObject) },
       })),
-      "deep",
     ),
   };
   for (const source of [
@@ -312,20 +348,28 @@ function reconcileScanMerge(
       );
   }
   const sources = new Map<string, JsonObject>();
-  for (const input of inputs) {
-    input.sourceFindings.forEach((finding, index) =>
-      sources.set(`${input.scanId}:${index}`, finding),
-    );
+  const sourceInputIndexes = new Map<string, number>();
+  for (const [inputIndex, input] of inputs.entries()) {
+    input.sourceFindings.forEach((finding, index) => {
+      const id = `${input.scanId}:${index}`;
+      sources.set(id, finding);
+      sourceInputIndexes.set(id, inputIndex);
+    });
   }
+  const previousSources = new Set<string>();
   for (const [index, finding] of (previous?.findings ?? []).entries()) {
     const originals = (finding["provenance"] as JsonObject)[
       "sourceFindings"
     ] as Array<{ id: string; finding: JsonObject }> | undefined;
     if (originals?.length) {
-      for (const original of originals)
+      for (const original of originals) {
         sources.set(original.id, original.finding);
+        previousSources.add(original.id);
+      }
     } else {
-      sources.set(`previous:${index}`, finding);
+      const id = `previous:${index}`;
+      sources.set(id, finding);
+      previousSources.add(id);
     }
   }
   const identities = new Map<JsonObject, string>();
@@ -391,6 +435,22 @@ function reconcileScanMerge(
       );
   };
   retainSources();
+  // Established source owners keep their identities regardless of model output
+  // order. Allocate collision suffixes to new findings, then restore that order.
+  const identityOrder = aggregate.findings
+    .map((finding, index) => ({
+      finding,
+      index,
+      retained: sourceIds(finding).some((id) => previousSources.has(id)),
+    }))
+    .sort((left, right) => Number(right.retained) - Number(left.retained));
+  const identified = prepareScanFindings(
+    identityOrder.map(({ finding }) => finding),
+    "deep",
+  );
+  identityOrder.forEach(({ index }, position) => {
+    aggregate.findings[index] = identified[position]!;
+  });
   const bySource = new Map<string, JsonObject>();
   const byIdentity = new Map<string, JsonObject>();
   for (const finding of aggregate.findings) {
@@ -469,10 +529,22 @@ function reconcileScanMerge(
       );
     if (distinct[0] !== undefined) aggregate[field] = distinct[0];
   }
+  const newFindings = aggregate.findings.filter(
+    (finding) => !retained.has(finding),
+  );
+  const novelInputs = new Set<number>();
+  for (const finding of newFindings) {
+    let earliest = inputs.length;
+    for (const id of sourceIds(finding))
+      earliest = Math.min(earliest, sourceInputIndexes.get(id) ?? earliest);
+    if (earliest < inputs.length) novelInputs.add(earliest);
+  }
   return {
     aggregate: structuredClone(aggregate),
-    newFindings: aggregate.findings.filter((finding) => !retained.has(finding))
-      .length,
+    newFindings: newFindings.length,
+    newFindingScanIds: inputs
+      .filter((_, index) => novelInputs.has(index))
+      .map((input) => input.scanId),
   };
 }
 

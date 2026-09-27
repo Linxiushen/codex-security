@@ -442,6 +442,25 @@ test("native cancellation drains only its parent; shutdown drains the rest", asy
   assert.deepEqual(closed, ["first", "second"]);
 });
 
+test("native shutdown prevents an in-flight request from starting a new scan", async () => {
+  const registered = Promise.withResolvers();
+  let preparations = 0;
+  const host = new NativeScanHost(async () => {
+    preparations++;
+    throw new Error("A closed host must not prepare another scan.");
+  });
+  // A tool request can be registering its scan when the MCP transport closes.
+  const request = registered.promise.then(() => host.run(input()));
+  await host.close();
+  registered.resolve();
+  await assert.rejects(request, (error) => {
+    assert.equal(error.constructor.name, "ScanTransportClosedError");
+    assert.equal(error.message, "mcp_transport_closed");
+    return true;
+  });
+  assert.equal(preparations, 0);
+});
+
 test("native scans preserve selected Codex homes and saved settings", async () => {
   const root = await realpath(
     await mkdtemp(join(tmpdir(), "native-codex-home-")),

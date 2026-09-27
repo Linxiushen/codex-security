@@ -148,6 +148,10 @@ def test_budget_completion_preserves_ordinary_aggregate_and_unresolved_work(
     tmp_path: Path, terminal: str
 ) -> None:
     state, _, directory, scan_id, checkpoint = budget_scan_fixture(tmp_path)
+    manifest_path = directory / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["artifacts"] = []
+    manifest_path.write_text(json.dumps(manifest))
     state_before = json.loads(checkpoint.read_text())
     checkpoint.write_text(json.dumps({**state_before, "terminalReason": terminal}))
     findings = json.loads((directory / "findings.json").read_text())["findings"]
@@ -197,6 +201,25 @@ def test_budget_completion_requires_exceeded_limit_and_finished_deep_aggregate(
         run_workbench(state, "get-scan", "--scan-id", scan_id)["scan"]["progress"]["status"]
         == "running"
     )
+
+
+def test_budget_completion_preserves_a_prepared_scan_seal(tmp_path: Path) -> None:
+    state, _, directory, scan_id, _ = budget_scan_fixture(tmp_path)
+    run_workbench(state, "prepare-scan-completion", "--scan-id", scan_id)
+    sealed = {
+        path.relative_to(directory): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+    rejected = complete_budget_scan(state, scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "already sealed" in rejected["stderr"]
+    assert all((directory / path).read_bytes() == payload for path, payload in sealed.items())
+    completed = run_workbench(state, "complete-scan", "--scan-id", scan_id)["scan"]
+    assert completed["progress"]["status"] == "complete"
+    assert completed["warnings"] == []
 
 
 def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(

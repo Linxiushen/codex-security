@@ -595,7 +595,7 @@ async function startReadOnlyCodexThread(
     configOverrides.push(
       `permissions.codex_security_comparison=${inlineToml({
         extends: ":read-only",
-        filesystem: options.inheritedPermissions.filesystem,
+        filesystem: readOnlyFilesystem(options.inheritedPermissions.filesystem),
         network: { enabled: false },
       })}`,
     );
@@ -670,6 +670,21 @@ async function startReadOnlyCodexThread(
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
   });
+}
+
+function readOnlyFilesystem(filesystem: JsonObject): JsonObject {
+  return Object.fromEntries(
+    Object.entries(filesystem).map(([path, access]) => [
+      path,
+      access === "write"
+        ? "read"
+        : typeof access === "object" &&
+            access !== null &&
+            !Array.isArray(access)
+          ? readOnlyFilesystem(access as JsonObject)
+          : access,
+    ]),
+  );
 }
 
 export async function runReadOnlyCodex(

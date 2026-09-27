@@ -19,7 +19,7 @@ EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
 
 
 @pytest.mark.parametrize("alias", ["exact", "case", "directory"])
-def test_stopped_projection_cannot_overwrite_report_with_evidence(tmp_path: Path, alias: str):
+def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path, alias: str):
     target = tmp_path / "target"
     target.mkdir()
     (target / "app.py").write_text("\n" * 50)
@@ -54,10 +54,17 @@ def test_stopped_projection_cannot_overwrite_report_with_evidence(tmp_path: Path
     run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
     saved = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
     assert saved["progress"]["status"] == "canceled"
-    assert any("conflicts with its projected report" in warning for warning in saved["warnings"])
-    projected = parent_dir / "findings" / f"{child['scanId']}-issue" / name
-    if projected.exists():
-        assert projected.read_bytes() == report.read_bytes()
+    assert not any(
+        "conflicts with its projected report" in warning for warning in saved.get("warnings", [])
+    )
+    slug = f"{child['scanId']}-issue-2"
+    projected = parent_dir / "findings" / slug / f"{slug}.md"
+    assert projected.read_bytes() == report.read_bytes()
+    assert (projected.parent / evidence.relative_to(reports)).read_bytes() == evidence.read_bytes()
+    parent_findings = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert (
+        parent_findings[0]["writeup"]["reportPath"] == projected.relative_to(parent_dir).as_posix()
+    )
     assert report.read_text() == "# Original report\n"
     assert evidence.read_text() == "Synthetic supporting evidence\n"
 
@@ -1147,6 +1154,56 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
             == "complete"
         )
     assert json.loads((parent_dir / CHECKPOINT).read_text()) == saved
+
+
+def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "scan", mode="deep")
+    parent_dir = Path(parent["scanDir"])
+    pass_directory = "artifacts/deep-scan/passes/pass-1"
+    child_dir = parent_dir / pass_directory
+    child = register(state, target, child_dir, parent=parent["scanId"])
+    write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
+    findings_path = child_dir / "findings.json"
+    findings = json.loads(findings_path.read_text())
+    findings["findings"][0]["writeup"] = {"reportPath": "findings/check/check.md"}
+    other = copy.deepcopy(findings["findings"][0])
+    other["identity"]["anchor"] = "another-finding"
+    other["writeup"]["reportPath"] = "findings/check-3/check-3.md"
+    findings["findings"].append(other)
+    findings_path.write_text(json.dumps(findings))
+    source = child_dir / "findings/check"
+    source.mkdir(parents=True)
+    base = f"{child['scanId']}-check"
+    evidence_name = f"{base}.MD".upper().replace("K", "\u212a")
+    evidence_directory = f"{base}-2.md"
+    report = f"# Validated finding\n\n[Evidence]({evidence_name})\n"
+    (source / "check.md").write_text(report)
+    (source / evidence_name).write_text("Supporting evidence.\n")
+    (source / evidence_directory).mkdir()
+    (source / evidence_directory / "trace.txt").write_text("Source trace.\n")
+    other_report = child_dir / "findings/check-3/check-3.md"
+    other_report.parent.mkdir()
+    other_report.write_text("# Another finding\n")
+    run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    checkpoint(state, parent, passes=[{"directory": pass_directory, "scanId": child["scanId"]}])
+
+    run_workbench(state, "cancel-scan", "--scan-id", parent["scanId"])
+
+    retained = json.loads((parent_dir / "findings.json").read_text())["findings"]
+    assert len(retained) == 2
+    assert {finding["writeup"]["reportPath"] for finding in retained} == {
+        f"findings/{base}-4/{base}-4.md",
+        f"findings/{base}-3/{base}-3.md",
+    }
+    projected = parent_dir / f"findings/{base}-4"
+    assert (projected / f"{base}-4.md").read_text() == report
+    assert (projected / evidence_name).read_text() == "Supporting evidence.\n"
+    assert (projected / evidence_directory / "trace.txt").read_text() == "Source trace.\n"
+    assert (parent_dir / f"findings/{base}-3/{base}-3.md").read_text() == "# Another finding\n"
 
 
 @pytest.mark.parametrize("has_aggregate", [False, True])
