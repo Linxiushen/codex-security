@@ -21,6 +21,7 @@ export {
 } from "./execution-auth.js";
 
 import {
+  SCAN_PERMISSION_PROFILE,
   prepareExecutionSource,
   createExecutionCodex,
   lockExecutionConfiguration,
@@ -34,7 +35,6 @@ import {
   type ScanPermissions,
   type CodexClientLike,
   type CodexThreadLike,
-  type ScanEvent,
 } from "./execution-preparation.js";
 
 import {
@@ -451,7 +451,6 @@ const DEFAULT_DEPENDENCIES: ClientDependencies = {
   environment: process.env,
 };
 
-const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const POLICY_PERMISSION_PROFILE = "codex_security_policy";
 export class CodexSecurity {
   public readonly config: Readonly<CodexSecurityConfig>;

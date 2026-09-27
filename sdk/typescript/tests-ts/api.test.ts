@@ -1748,9 +1748,10 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          resolveCodexCommand: () => {
-            throw new Error(`${provider} must not sign in to OpenAI`);
-          },
+          // The injected model client needs no process; an auth probe must fail.
+          resolveCodexCommand: () => ({
+            command: join(root, "unexpected-openai-auth.exe"),
+          }),
           createCodex: (options: CodexOptions) => {
             codexOptions = options;
             return {
@@ -1839,9 +1840,10 @@ describe("CodexSecurity orchestration", () => {
           resolvePluginPython: async () => "/managed/python",
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
-          resolveCodexCommand: () => {
-            throw new Error("Amazon Bedrock must not sign in to OpenAI");
-          },
+          // The injected model client needs no process; an auth probe must fail.
+          resolveCodexCommand: () => ({
+            command: join(root, "unexpected-openai-auth.exe"),
+          }),
           createCodex: (options: CodexOptions) => {
             codexOptions = options;
             return {
@@ -1964,9 +1966,10 @@ describe("CodexSecurity orchestration", () => {
           }
           return mockWorkbench(args, input);
         },
-        resolveCodexCommand: () => {
-          throw new Error("The Bedrock profile must not sign in to OpenAI");
-        },
+        // The injected model client needs no process; an auth probe must fail.
+        resolveCodexCommand: () => ({
+          command: join(root, "unexpected-openai-auth.exe"),
+        }),
         createCodex: (options: CodexOptions) => {
           codexOptions = options;
           return {

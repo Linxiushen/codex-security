@@ -52,7 +52,7 @@ import { createPermissionCheckedCodex } from "./permission-profile.js";
 import type { ScanAuthMode } from "./scan-settings.js";
 import type { InspectedExecutable } from "./trusted-executable.js";
 
-const SCAN_PERMISSION_PROFILE = "codex_security_scan";
+export const SCAN_PERMISSION_PROFILE = "codex_security_scan";
 const SAFETY_IDENTIFIER_ENV = "CODEX_SAFETY_IDENTIFIER";
 
 export type ExecutionPolicy = "ordinary" | "discovery" | "merge";
