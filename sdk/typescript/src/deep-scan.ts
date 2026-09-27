@@ -33,6 +33,18 @@ import {
   type DeepScanCheckpoint,
 } from "./deep-scan-checkpoint.js";
 import {
+  acceptMerge,
+  discoveryStopReason,
+  exhaustPassRetries,
+  observePassCompletion,
+  observePassFailure,
+  passDirectory,
+  recordMergeFailure,
+  registerPass,
+  reservePass,
+  stopDiscovery,
+} from "./deep-scan-lifecycle.js";
+import {
   savedScanFromWorkbench,
   savedScansFromWorkbench,
   type SavedScanRecord,
@@ -78,10 +90,6 @@ export interface DeepScanComposition {
   publish(draft: SemanticScan): Promise<void>;
   onCost(key: string, cost: Readonly<ScanCost> | null): void;
   historicalCost?(threadId: string): Promise<ScanCost | null>;
-}
-
-function passDirectory(index: number): string {
-  return `artifacts/deep-scan/passes/pass-${index + 1}`;
 }
 
 function validatePassDirectories(state: DeepScanCheckpoint): void {
@@ -263,15 +271,9 @@ export async function runDeepScans(
       const index = savedPassIndex(input, state, record);
       if (index < 0) continue;
       const pass = state.passes[index]!;
-      pass.scanId = record.scanId;
-      if (
-        recoverOutcomes &&
-        record.progress.status === "failed" &&
-        (!pass.failed || recoveredSuccess)
-      ) {
-        pass.failed = true;
-        state.consecutiveErrors += 1;
-      }
+      registerPass(pass, record.scanId);
+      if (recoverOutcomes && record.progress.status === "failed")
+        observePassFailure(state, pass, recoveredSuccess);
       saved.set(record.scanId, record);
       if (
         record.progress.status === "complete" ||
@@ -297,15 +299,11 @@ export async function runDeepScans(
             signal,
           ),
         );
-        if (
-          recoverOutcomes &&
-          (recoveredSuccess ||
-            (!pass.completed && !state.mergedScanIds.includes(record.scanId)))
-        ) {
-          state.consecutiveErrors = 0;
-          recoveredSuccess = true;
-        }
-        pass.completed = true;
+        if (recoverOutcomes)
+          recoveredSuccess =
+            observePassCompletion(state, pass, recoveredSuccess) ||
+            recoveredSuccess;
+        else pass.completed = true;
       }
     }
     await save();
@@ -411,31 +409,25 @@ export async function runDeepScans(
           isCodexCybersecurityPolicyRefusal(error)
         )
           throw error;
-        state.mergeFailures = (state.mergeFailures ?? 0) + 1;
+        const failures = recordMergeFailure(state);
         await save();
-        if (state.mergeFailures >= settings.stopAfterConsecutiveErrors)
-          throw error;
+        if (failures >= settings.stopAfterConsecutiveErrors) throw error;
       }
     }
     executionSignal.throwIfAborted();
-    state.aggregate = {
-      ...merged.aggregate,
-      coverage: combineScanCoverage(
+    acceptMerge(
+      state,
+      merged,
+      pending.map((result) => result.scanId),
+      combineScanCoverage(
         [...accepted.values()],
         scanDir,
         [],
         state.legacy?.coverage,
       ),
-    };
-    state.mergeFailures = 0;
-    state.mergedScanIds.push(...pending.map((result) => result.scanId));
-    const novelPasses = new Set(merged.newFindingScanIds);
-    for (const pass of pending)
-      state.noNewStreak = novelPasses.has(pass.scanId)
-        ? 0
-        : state.noNewStreak + 1;
+    );
     await save();
-    await input.publish(state.aggregate);
+    await input.publish(state.aggregate!);
   };
   const runPass = async (
     pass: DeepScanCheckpoint["passes"][number],
@@ -458,7 +450,7 @@ export async function runDeepScans(
             deepScanPass: true,
             signal: discoverySignal,
             onRegisteredScan: async (registration) => {
-              pass.scanId = registration["scanId"] as string;
+              registerPass(pass, registration["scanId"] as string);
               await save();
             },
             onCost: (cost) => {
@@ -476,8 +468,7 @@ export async function runDeepScans(
           );
           reportPassCost(pass.directory, result.cost);
           executionSignal.throwIfAborted();
-          pass.completed = true;
-          state.consecutiveErrors = 0;
+          observePassCompletion(state, pass);
           await save();
           return;
         } catch (error) {
@@ -501,15 +492,14 @@ export async function runDeepScans(
                   : []),
               ]);
             }
-            pass.failed = true;
-            state.consecutiveErrors += 1;
             if (
-              state.consecutiveErrors >= settings.stopAfterConsecutiveErrors
-            ) {
-              // Persist the stop decision in the same checkpoint as its counter.
-              state.terminalReason = "failed";
+              exhaustPassRetries(
+                state,
+                pass,
+                settings.stopAfterConsecutiveErrors,
+              )
+            )
               externalStop.abort(consecutiveErrorLimit);
-            }
             await save();
             return;
           }
@@ -551,25 +541,21 @@ export async function runDeepScans(
       await mergePending();
       const discoveryDeadlineReached =
         deadlineController.signal.aborted || Date.now() >= deadline;
-      if (
-        !discoveryDeadlineReached &&
-        state.noNewStreak >= settings.stopAfterNoNew
-      ) {
-        state.terminalReason = "saturated";
-        break;
-      }
       const unfinished = state.passes.filter(
         (pass) =>
           !pass.failed &&
           (pass.scanId === undefined ||
             saved.get(pass.scanId)?.progress.status === "running"),
       );
-      if (
-        discoveryDeadlineReached ||
-        (unfinished.length === 0 &&
-          previousRuns + state.passes.length >= settings.maxDiscoveryRuns)
-      ) {
+      const stop = discoveryStopReason(state, {
+        deadlineReached: discoveryDeadlineReached,
+        hasUnfinishedPasses: unfinished.length > 0,
+        maxDiscoveryRuns: settings.maxDiscoveryRuns,
+        stopAfterNoNew: settings.stopAfterNoNew,
+      });
+      if (stop !== undefined) {
         if (
+          stop === "capped" &&
           !discoveryDeadlineReached &&
           state.aggregate === null &&
           state.consecutiveErrors > 0
@@ -577,7 +563,7 @@ export async function runDeepScans(
           throw new Error(
             "Deep Scan stopped because every discovery run failed.",
           );
-        state.terminalReason = "capped";
+        stopDiscovery(state, stop);
         break;
       }
       const batch = unfinished.slice(0, settings.workers);
@@ -585,9 +571,7 @@ export async function runDeepScans(
         batch.length < settings.workers &&
         previousRuns + state.passes.length < settings.maxDiscoveryRuns
       ) {
-        const pass = { directory: passDirectory(state.passes.length) };
-        state.passes.push(pass);
-        batch.push(pass);
+        batch.push(reservePass(state));
       }
       await save();
       const results = await Promise.allSettled(batch.map(runPass));
@@ -612,11 +596,12 @@ export async function runDeepScans(
       ),
     };
     await save();
-    await input.publish(state.aggregate);
+    await input.publish(state.aggregate!);
     return state;
   } catch (error) {
     if (signal.reason instanceof ScanTransportClosedError) throw error;
-    state.terminalReason =
+    stopDiscovery(
+      state,
       externalStop.signal.reason === consecutiveErrorLimit
         ? "failed"
         : signal.reason instanceof ScanCostLimitExceededError
@@ -627,7 +612,8 @@ export async function runDeepScans(
               !(executionSignal.reason instanceof ScanPermissionError) &&
               !isCodexCybersecurityPolicyRefusal(executionSignal.reason)
             ? "canceled"
-            : "failed";
+            : "failed",
+    );
     if (state.aggregate !== null) {
       state.aggregate = {
         ...state.aggregate,
