@@ -449,13 +449,16 @@ describe("multiscan", () => {
         paths.input,
         `id,repository,revision\nretained,${source.path},${source.revision}\n`,
       );
+      const document = join(paths.root, "context.md");
+      await writeFile(document, "Synthetic context.");
+      const knowledgeBasePaths = [document];
       await runMultiscan(
         options(
           paths,
           client(async () => {
             throw new Error("Stopped");
           }),
-          { maxAttempts: 1 },
+          { maxAttempts: 1, knowledgeBasePaths },
         ),
       );
       const dir = join(paths.output, "artifacts", "retained", "attempt-1");
@@ -463,24 +466,37 @@ describe("multiscan", () => {
       await writeFile(join(dir, "checkpoint"), "keep");
       let resumed = 0;
       let runs = 0;
-      const summary = await runMultiscan(
-        options(
-          paths,
-          client(async (_repo, scan = {}) => {
-            runs++;
-            return completedScan(scan.outputDir!);
-          }),
-          {
-            maxAttempts: 3,
-            recoverScan: async (scanDir) => {
-              resumed++;
-              expect(scanDir).toBe(dir);
-              if (failure) throw new Error("Resume transport failed");
-              return completedScan(scanDir);
-            },
+      const configured = options(
+        paths,
+        client(async (_repo, scan = {}) => {
+          runs++;
+          return completedScan(scan.outputDir!);
+        }),
+        {
+          maxAttempts: 3,
+          knowledgeBasePaths,
+          recoverScan: async (scanDir) => {
+            resumed++;
+            expect(scanDir).toBe(dir);
+            if (failure) throw new Error("Resume transport failed");
+            return completedScan(scanDir);
           },
-        ),
+        },
       );
+      await rm(document);
+      expect(await runMultiscan(configured)).toMatchObject({
+        completed: 0,
+        failed: 1,
+      });
+      expect(resumed).toBe(0);
+      expect(
+        (await results(join(paths.output, "results.jsonl"))).at(-1),
+      ).toMatchObject({
+        status: "failed",
+        attempt: 1,
+      });
+      await writeFile(document, "Synthetic context.");
+      const summary = await runMultiscan(configured);
       expect(runs).toBe(0);
       expect(resumed).toBe(1);
       expect(summary.failed).toBe(failure ? 1 : 0);
@@ -2102,16 +2118,20 @@ describe("multiscan", () => {
         calls++;
         return completedScan(scanOptions.outputDir!);
       });
-      const run = (knowledgeBasePaths: string[]) =>
+      const run = (
+        knowledgeBasePaths: string[],
+        overrides: Partial<MultiscanOptions> = {},
+      ) =>
         runMultiscan(
-          options(
-            paths,
-            security,
-            perMode
+          options(paths, security, {
+            ...(perMode
               ? { scanOptionsByMode: { standard: { knowledgeBasePaths } } }
-              : { knowledgeBasePaths },
-          ),
+              : { knowledgeBasePaths }),
+            ...overrides,
+          }),
         );
+      const recover = { recoverScan: async () => undefined };
+      const manifestPath = join(paths.output, "manifest.json");
       let reverseListing = false;
       const originalReaddir = filesystem.readdir;
       const listingSpy = spyOn(filesystem, "readdir").mockImplementation(
@@ -2131,12 +2151,75 @@ describe("multiscan", () => {
         },
       );
       try {
-        await run([knowledge]);
+        let attempts = 0;
+        for (const failure of [
+          "missing",
+          ...(process.platform === "win32" ? [] : ["unreadable"]),
+          "invalid",
+        ]) {
+          const moved = `${knowledge}-moved`;
+          if (failure === "missing") await rename(knowledge, moved);
+          else if (failure === "unreadable") await chmod(document, 0);
+          else await writeFile(document, Buffer.from([0xff]));
+          try {
+            const failed = await run([knowledge], attempts > 0 ? recover : {});
+            attempts += 2;
+            expect(failed).toMatchObject({
+              completed: 0,
+              failed: 1,
+              skipped: 0,
+            });
+            const receipts = await results(failed.resultsPath);
+            expect(receipts).toHaveLength(attempts);
+            expect(receipts.at(-1)).toMatchObject({
+              id: "knowledge",
+              status: "failed",
+              attempt: attempts,
+            });
+            expect(calls).toBe(0);
+            expect(
+              JSON.parse(await readFile(manifestPath, "utf8"))
+                .knowledgeBaseDigest,
+            ).toBeNull();
+          } finally {
+            if (failure === "missing") await rename(moved, knowledge);
+            else if (failure === "unreadable") await chmod(document, 0o600);
+            else await writeFile(document, "Original context.");
+          }
+        }
+        await run([knowledge], perMode ? recover : {});
         reverseListing = true;
         expect(await run([knowledge])).toMatchObject({ skipped: 1 });
       } finally {
         listingSpy.mockRestore();
       }
+      const boundManifest = await readFile(manifestPath, "utf8");
+      const completedReceipt = (
+        await results(join(paths.output, "results.jsonl"))
+      ).at(-1)!;
+      await writeFile(document, Buffer.from([0xff]));
+      await expect(
+        run([knowledge], { scanPrompt: "Changed review scope." }),
+      ).rejects.toThrow("manifest does not match");
+      expect(await run([knowledge], perMode ? recover : {})).toMatchObject({
+        completed: 0,
+        failed: 1,
+        skipped: 0,
+      });
+      expect(calls).toBe(1);
+      expect(await readFile(manifestPath, "utf8")).toBe(boundManifest);
+      expect(
+        await readFile(
+          join(completedReceipt["outputDir"] as string, "report.md"),
+          "utf8",
+        ),
+      ).toBe("{}\n");
+      await writeFile(document, "Original context.");
+      expect(await run([knowledge], perMode ? recover : {})).toMatchObject({
+        completed: 1,
+        failed: 0,
+        skipped: 0,
+      });
       expect(
         await run(
           perMode ? [knowledge] : [document, deployment, priorities, document],
@@ -2155,12 +2238,11 @@ describe("multiscan", () => {
       await expect(run([knowledge])).rejects.toThrow("manifest does not match");
       await rm(additional);
       expect(await run([knowledge])).toMatchObject({ skipped: 1 });
-      const manifestPath = join(paths.output, "manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       delete manifest.knowledgeBaseDigest;
       await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
       await expect(run([knowledge])).rejects.toThrow("manifest does not match");
-      expect(calls).toBe(1);
+      expect(calls).toBe(2);
     },
   );
 

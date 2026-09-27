@@ -220,26 +220,32 @@ async function runCampaign(
   await ensureOutputDirectory(join(output, "checkouts"));
   await ensureOutputDirectory(join(output, "artifacts"));
   const knowledgeByMode: Partial<Record<ScanMode, KnowledgeBaseSnapshot>> = {};
-  const sharedKnowledge = options.knowledgeBasePaths?.length
-    ? await readKnowledgeBaseSnapshot(
-        options.knowledgeBasePaths,
-        options.signal,
-      )
-    : undefined;
-  for (const mode of new Set(tasks.map((task) => task.mode))) {
-    const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
-    const snapshot =
-      sharedKnowledge ??
-      (paths?.length
-        ? await readKnowledgeBaseSnapshot(paths, options.signal)
-        : undefined);
-    if (snapshot !== undefined) knowledgeByMode[mode] = snapshot;
+  let knowledgeFailure: { error: unknown } | undefined;
+  try {
+    const sharedKnowledge = options.knowledgeBasePaths?.length
+      ? await readKnowledgeBaseSnapshot(
+          options.knowledgeBasePaths,
+          options.signal,
+        )
+      : undefined;
+    for (const mode of new Set(tasks.map((task) => task.mode))) {
+      const paths = options.scanOptionsByMode?.[mode]?.knowledgeBasePaths;
+      const snapshot =
+        sharedKnowledge ??
+        (paths?.length
+          ? await readKnowledgeBaseSnapshot(paths, options.signal)
+          : undefined);
+      if (snapshot !== undefined) knowledgeByMode[mode] = snapshot;
+    }
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    knowledgeFailure = { error };
   }
   await ensureManifest(
     join(output, "manifest.json"),
     tasks,
     options,
-    knowledgeByMode,
+    knowledgeFailure === undefined ? knowledgeByMode : null,
   );
   const receipts = await readReceipts(
     ledger,
@@ -255,8 +261,8 @@ async function runCampaign(
   let untouched = 0;
   for (const task of tasks) {
     const receipt = receipts.get(task.id.toLowerCase());
-    if (receipt === undefined) {
-      if (options.recoverScan !== undefined) {
+    if (receipt === undefined || knowledgeFailure !== undefined) {
+      if (receipt === undefined && options.recoverScan !== undefined) {
         const attempts = await readdir(
           join(output, "artifacts", task.id),
         ).catch((error: NodeJS.ErrnoException) => {
@@ -378,6 +384,7 @@ async function runCampaign(
                 attempt,
                 status: "started",
               });
+              if (knowledgeFailure !== undefined) throw knowledgeFailure.error;
               result = await options.recoverScan(scanDir, {
                 ...options,
                 knowledgeBaseSnapshot: knowledgeByMode[task.mode],
@@ -394,6 +401,7 @@ async function runCampaign(
               attempt,
               status: "started",
             });
+            if (knowledgeFailure !== undefined) throw knowledgeFailure.error;
             if (options.recoverScan !== undefined) {
               const checkoutRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
@@ -846,10 +854,10 @@ async function ensureManifest(
     | "scanOptionsByMode"
     | "config"
   >,
-  knowledgeByMode: Partial<Record<ScanMode, KnowledgeBaseSnapshot>>,
+  knowledgeByMode: Partial<Record<ScanMode, KnowledgeBaseSnapshot>> | null,
 ): Promise<void> {
   const knowledgeDigests = Object.fromEntries(
-    Object.entries(knowledgeByMode).map(([mode, snapshot]) => [
+    Object.entries(knowledgeByMode ?? {}).map(([mode, snapshot]) => [
       mode,
       workflowDigest(snapshot.documents),
     ]),
@@ -870,9 +878,12 @@ async function ensureManifest(
       ...(options.maxCostUsd === undefined
         ? {}
         : { maxCostUsd: options.maxCostUsd }),
-      ...(Object.keys(knowledgeDigests).length > 0
-        ? { knowledgeBaseDigest: workflowDigest(knowledgeDigests) }
-        : {}),
+      // A failed extraction cannot bind inputs or start scans; it can be retried.
+      ...(knowledgeByMode === null
+        ? { knowledgeBaseDigest: null }
+        : Object.keys(knowledgeDigests).length > 0
+          ? { knowledgeBaseDigest: workflowDigest(knowledgeDigests) }
+          : {}),
       ...(options.scanOptionsByMode === undefined &&
       Object.keys(options.config.codexOverrides ?? {}).length === 0
         ? {}
@@ -890,11 +901,24 @@ async function ensureManifest(
     await writeFile(path, expected, { flag: "wx", mode: 0o600 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if ((await readFile(path, "utf8")) !== expected) {
-      throw new Error(
-        "Multiscan manifest does not match existing output directory.",
-      );
+    const existing = await readFile(path, "utf8");
+    if (existing === expected) return;
+    const { knowledgeBaseDigest: savedDigest, ...savedInputs } = JSON.parse(
+      existing,
+    ) as Record<string, unknown>;
+    const { knowledgeBaseDigest: expectedDigest, ...expectedInputs } =
+      JSON.parse(expected) as Record<string, unknown>;
+    if (
+      (expectedDigest === null || savedDigest === null) &&
+      JSON.stringify(savedInputs) === JSON.stringify(expectedInputs)
+    ) {
+      // Only a campaign that never started scans may bind its inputs later.
+      if (expectedDigest !== null) await writeFile(path, expected);
+      return;
     }
+    throw new Error(
+      "Multiscan manifest does not match existing output directory.",
+    );
   }
 }
 
