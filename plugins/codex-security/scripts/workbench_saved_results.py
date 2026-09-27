@@ -884,6 +884,13 @@ def merge_saved_results(
 
     resolved: dict[tuple[str | None, str], str] = {}
     for owner, draft in current_drafts:
+        # A retry can retain older dispositions beside a newer explicit proof gap.
+        pending = draft["coverage"].get("deferred", [])
+        pending_candidates = {
+            coverage_candidate(owner, item)
+            for item in (pending if isinstance(pending, list) else [])
+            if isinstance(item, dict)
+        }
         for finding in draft["findings"]:
             if (
                 isinstance(finding, dict)
@@ -899,6 +906,7 @@ def merge_saved_results(
                     and isinstance(item.get("candidateId"), str)
                     and item.get("disposition") in {"reported", "rejected", "not_applicable"}
                     and (candidate := coverage_candidate(owner, item)) is not None
+                    and candidate not in pending_candidates
                 ):
                     resolved.setdefault(candidate, item["disposition"])
     # Only the current parent may claim that another worker finding was absorbed.

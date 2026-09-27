@@ -34,8 +34,10 @@ export async function publishCoverageFixture(
     resume = false,
     continueAfterResume = false,
     stopAfterDraft = false,
+    stopBeforeDraft = false,
     receiptRetry = false,
     retryPending = false,
+    retryCoverage,
     questionRows,
     interruptPublication = false,
   } = {},
@@ -111,6 +113,24 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   });
   const rawSources = new Map();
   const writeReceiptAttempt = async (artifactDir) => {
+    if (retryCoverage) {
+      await mkdir(artifactDir, { recursive: true });
+      await recordCodexSecurityWorkerScanDraft(
+        {
+          root: artifactDir,
+          layout: "worker",
+          repoRoot: targetPath,
+          scanId: run.scanId,
+        },
+        {
+          scanId: run.scanId,
+          complete: false,
+          findings: [],
+          coverage: retryCoverage[0],
+        },
+      );
+      return;
+    }
     await mkdir(path.join(artifactDir, "artifacts"), { recursive: true });
     await writeFile(
       path.join(artifactDir, "artifacts", "prior.txt"),
@@ -203,6 +223,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       openQuestions:
         questionRows ??
         (pending ? [{ question: `Deployment question ${index + 1}.` }] : []),
+      ...(retryCoverage && index === 0
+        ? structuredClone(retryCoverage[1])
+        : {}),
     };
     for (const field of [
       "surfaces",
@@ -307,7 +330,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         artifactDir,
         attempt: index === 0 ? 2 : 1,
       };
-      if (receiptRetry) {
+      if (receiptRetry || (retryCoverage && index === 0)) {
         await writeReceiptAttempt(artifactDir);
         await archiveDirectory(
           artifactDir,
@@ -384,7 +407,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
               .at(-1),
           ) - 1;
         if (index === 0 && discoveryCalls === 1) {
-          if (receiptRetry) {
+          if (receiptRetry || (retryCoverage && index === 0)) {
             await writeReceiptAttempt(request.artifactContext.root);
           }
           return {
@@ -413,6 +436,8 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     pluginRoot,
     retryDelaysMs: [1],
     onComplete: async (draft, signal) => {
+      if (stopBeforeDraft)
+        throw new Error("Synthetic stop before parent draft.");
       await recordCodexSecurityScanDraftViaWorkbench(
         context,
         draft,
@@ -423,7 +448,11 @@ runpy.run_path(sys.argv[0], run_name="__main__")
   });
   coordinator.start();
   const terminal = await coordinator.wait(undefined, 30_000);
-  assert.equal(terminal?.status, "succeeded", terminal?.error);
+  assert.equal(
+    terminal?.status,
+    stopBeforeDraft ? "failed" : "succeeded",
+    terminal?.error,
+  );
   assert.equal(
     terminal.noNewStreak,
     statuses.length,
@@ -463,7 +492,14 @@ runpy.run_path(sys.argv[0], run_name="__main__")
       }
     }
   }
-  if (stopAfterDraft) {
+  if (stopBeforeDraft) {
+    const recovered = await runWorkbench([
+      "recover-scan-results",
+      "--scan-id",
+      run.scanId,
+    ]);
+    assert.equal(recovered.scan.resultsRecoveryNeeded, false);
+  } else if (stopAfterDraft) {
     const stopped = await runWorkbench([
       "fail-scan",
       "--scan-id",
