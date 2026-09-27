@@ -240,22 +240,24 @@ describe("scan knowledge bases", () => {
 
     const controller = new AbortController();
     const reason = new Error("Knowledge-base preparation canceled.");
-    let checks = 0;
-    const signalSpy = spyOn(controller.signal, "throwIfAborted");
-    signalSpy.mockImplementation(() => {
-      if (++checks === 4) controller.abort(reason);
-      if (controller.signal.aborted) throw controller.signal.reason;
-    });
-    const temporarySpy = spyOn(os, "tmpdir").mockImplementation(() => staging);
+    const originalWriteFile = filesystem.writeFile;
+    let staged = false;
+    const writeSpy = spyOn(filesystem, "writeFile").mockImplementation(
+      async (...args) => {
+        await Reflect.apply(originalWriteFile, filesystem, args);
+        staged = true;
+        controller.abort(reason);
+      },
+    );
 
     try {
       await expect(
-        prepareKnowledgeBase([first, second], controller.signal),
+        prepareKnowledgeBase([first, second], controller.signal, staging),
       ).rejects.toBe(reason);
+      expect(staged).toBe(true);
       expect(await readdir(staging)).toEqual([]);
     } finally {
-      signalSpy.mockRestore();
-      temporarySpy.mockRestore();
+      writeSpy.mockRestore();
     }
   });
 
