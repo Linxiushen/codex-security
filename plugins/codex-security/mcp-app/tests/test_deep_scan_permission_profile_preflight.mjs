@@ -697,13 +697,26 @@ async function testRuntimeFallbackWarningClassification() {
 }
 
 async function testAbortKillsPreflightChild() {
-  for (const ignoreTermination of [false, true]) {
+  for (const [ignoreTermination, inheritStdio] of [
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ]) {
     await withFakeCodex(
       {
         hangAt: "config/read",
         ignoreTermination,
+        inheritStdio,
       },
-      async ({ codexPath, cwd, readyPath, terminatedPath, children }) => {
+      async ({
+        codexPath,
+        cwd,
+        readyPath,
+        terminatedPath,
+        descendantPidPath,
+        children,
+      }) => {
         const controller = new AbortController();
         const running = preflightDeepScanWorkerPermissionProfile({
           codexPath,
@@ -735,6 +748,10 @@ async function testAbortKillsPreflightChild() {
         assert.ok(
           children[0].exitCode !== null || children[0].signalCode !== null,
         );
+        if (inheritStdio) {
+          const pid = Number(await readFile(descendantPidPath, "utf8"));
+          assert.doesNotThrow(() => process.kill(pid, 0));
+        }
         if (ignoreTermination && process.platform !== "win32") {
           assert.equal(children[0].signalCode, "SIGKILL");
         } else {
@@ -810,6 +827,7 @@ async function withFakeCodex(
   const envPath = path.join(root, "env.json");
   const readyPath = path.join(root, "ready");
   const terminatedPath = path.join(root, "terminated");
+  const descendantPidPath = path.join(root, "descendant-pid");
   const fixture = {
     ...scenario,
     argvPath,
@@ -818,6 +836,7 @@ async function withFakeCodex(
     envPath,
     readyPath,
     terminatedPath,
+    descendantPidPath,
   };
   await writeFile(scriptPath, fakeCodexSource(fixture), "utf8");
   await chmod(scriptPath, 0o755);
@@ -863,9 +882,18 @@ async function withFakeCodex(
       envPath,
       readyPath,
       terminatedPath,
+      descendantPidPath,
       children,
     });
   } finally {
+    const descendantPid = await readFile(descendantPidPath, "utf8").catch(
+      (error) => {
+        if (error.code !== "ENOENT") throw error;
+        return undefined;
+      },
+    );
+    if (descendantPid !== undefined)
+      process.kill(Number(descendantPid), "SIGKILL");
     for (const child of children) {
       if (child.exitCode === null && child.signalCode === null) {
         const closed = new Promise((resolve) => child.once("close", resolve));
@@ -881,6 +909,7 @@ async function withFakeCodex(
 
 function fakeCodexSource(scenario) {
   return `#!/usr/bin/env node
+import { spawn } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 
 const scenario = JSON.parse(${JSON.stringify(JSON.stringify(scenario))});
@@ -891,6 +920,13 @@ writeFileSync(scenario.envPath, JSON.stringify({
   sentinel: process.env.DEEP_SCAN_PREFLIGHT_ENV_SENTINEL ?? null
 }));
 if (scenario.stderr) process.stderr.write(scenario.stderr);
+if (scenario.inheritStdio) {
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+    stdio: ["ignore", "inherit", "inherit"],
+  });
+  writeFileSync(scenario.descendantPidPath, String(descendant.pid));
+  descendant.unref();
+}
 let buffer = "";
 let catalogIndex = 0;
 if (scenario.ignoreTermination) setInterval(() => {}, 1_000);

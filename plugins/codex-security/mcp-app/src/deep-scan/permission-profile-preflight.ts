@@ -266,6 +266,10 @@ class AppServerPreflightClient {
       if (this.child.exitCode === null && this.child.signalCode === null) {
         this.child.kill("SIGKILL");
       }
+      // Descendants can keep inherited pipes open after the child exits.
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
     }, 1_000);
     try {
       await this.childClose;
