@@ -248,6 +248,23 @@ async function preserveScanDraft(
     const final = sources.find((source) => source.complete !== false);
     if (final) result = structuredClone(final);
   }
+  // Older drafts used the deferred row's id as a candidate alias. Preserve that
+  // association explicitly so later surface updates cannot erase it.
+  const historicalCandidateIds = new Set(
+    sources.flatMap((source) =>
+      (source.coverage.surfaces as JsonObject[]).flatMap((surface) =>
+        typeof surface.candidateId === "string" ? [surface.candidateId] : [],
+      ),
+    ),
+  );
+  for (const scan of [result, ...sources])
+    for (const row of scan.coverage.deferred as JsonObject[])
+      if (
+        row.candidateId === undefined &&
+        typeof row.id === "string" &&
+        historicalCandidateIds.has(row.id)
+      )
+        row.candidateId = row.id;
   const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
@@ -696,6 +713,7 @@ function resolvedCoverageSurfaceIds(
   return new Set(
     surfaces.flatMap((surface) =>
       typeof surface.id === "string" &&
+      typeof surface.candidateId !== "string" &&
       counts.get(surface.id) === 1 &&
       surface.disposition !== "needs_follow_up" &&
       !pending.has(surface.id) &&

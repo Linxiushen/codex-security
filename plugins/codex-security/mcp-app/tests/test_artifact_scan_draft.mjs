@@ -1147,6 +1147,7 @@ try {
 
   for (const [name, candidate] of [
     ["candidate-id", { candidateId: "candidate-still-pending" }],
+    ["historical-surface", { id: "candidate-still-pending" }],
     [
       "original-candidate",
       {
@@ -1172,7 +1173,16 @@ try {
     };
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...surfaceDraft,
-      coverage: { ...surfaceDraft.coverage, deferred: [unresolved] },
+      coverage: {
+        ...surfaceDraft.coverage,
+        surfaces: surfaceDraft.coverage.surfaces.map((surface) => ({
+          ...surface,
+          ...(name === "historical-surface"
+            ? { candidateId: candidate.id }
+            : {}),
+        })),
+        deferred: [unresolved],
+      },
     });
     const resolvedSurfaceDraft = {
       ...surfaceDraft,
@@ -1196,9 +1206,40 @@ try {
     );
     const retainedCoverage = await readJson(sharedSurfaceRoot, "coverage.json");
     assert.equal(retainedCoverage.completeness, "partial");
-    assert.deepEqual(retainedCoverage.deferred, [
-      { ...unresolved, id: candidate.candidateId ?? candidate.id },
-    ]);
+    const retainedCandidate = {
+      ...unresolved,
+      id: candidate.candidateId ?? candidate.id,
+      ...(name === "historical-surface" ? { candidateId: candidate.id } : {}),
+    };
+    assert.deepEqual(retainedCoverage.deferred, [retainedCandidate]);
+    if (name === "historical-surface") {
+      for (const association of [
+        undefined,
+        undefined,
+        "other-candidate",
+        candidate.id,
+      ]) {
+        await recordCodexSecurityScanDraft(sharedSurfaceContext, {
+          ...resolvedSurfaceDraft,
+          coverage: {
+            ...resolvedSurfaceDraft.coverage,
+            surfaces: [
+              {
+                ...surfaceDraft.coverage.surfaces[0],
+                disposition:
+                  association === candidate.id ? "reported" : "rejected",
+                ...(association === undefined
+                  ? {}
+                  : { candidateId: association }),
+              },
+            ],
+          },
+        });
+        const retained = await readJson(sharedSurfaceRoot, "coverage.json");
+        assert.equal(retained.completeness, "partial");
+        assert.deepEqual(retained.deferred, [retainedCandidate]);
+      }
+    }
     await recordCodexSecurityScanDraft(sharedSurfaceContext, {
       ...resolvedSurfaceDraft,
       coverage: {
