@@ -65,6 +65,7 @@
     "scripts/deep_scan_defaults.json",
     "scripts/filesystem_identity.py",
     "scripts/finalize_scan_contract.py",
+    "scripts/project_scan_artifacts.py",
     "scripts/finding_preview.py",
     "scripts/generate_in_scope_files.py",
     "scripts/generate_rank_input.py",

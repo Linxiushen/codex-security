@@ -12,7 +12,6 @@ import re
 import sqlite3
 import stat
 import sys
-import unicodedata
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
@@ -38,6 +37,7 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
+from project_scan_artifacts import project_scan_artifacts
 from workbench_composition import (
     COMPOSITION_CHECKPOINT,
     CompositionCheckpoint,
@@ -1359,86 +1359,20 @@ def _stopped_child_draft(db: Any, child: Any, scan_dir: Path) -> dict[str, Any] 
             draft_documents=documents,
         )
     db.verify_manifest_binding(child, manifest)
-    findings["findings"] = [
-        finding
-        for finding in findings["findings"]
-        if any(
-            path_within_scope(location["path"], scope)
-            for location in finding["locations"]
-            for scope in manifest["scan"]["scope"]["includePaths"]
-        )
-    ]
-    prefix = child_dir.relative_to(scan_dir).as_posix()
-    reserved_slugs = {
-        f"{child['id']}-{Path(finding['writeup']['reportPath']).parent.name}".upper()
-        for finding in findings["findings"]
-        if isinstance(finding.get("writeup"), dict)
-    }
-    for index, finding in enumerate(findings["findings"]):
-        original = copy.deepcopy(finding)
-        source_id = f"{child['id']}:{index}"
-        for field in ("findingId", "occurrenceId", "fingerprints"):
-            finding.pop(field, None)
+    projected = project_scan_artifacts(
+        child["parent_scan_id"], child["id"], child_dir, scan_dir, manifest, findings, coverage
+    )
+    draft = projected["draft"]
+    for index, finding in enumerate(draft["findings"]):
         # No semantic merge has accepted these independent observations yet.
         identity = finding["identity"]
         identity["instance"] = f"{child['id']}-{identity.get('instance', 'saved')}"
-        provenance = finding.setdefault("provenance", {})
+        provenance = finding["provenance"]
         provenance.pop("preservedIdentity", None)
-        provenance.update(
-            sourceFindingIds=[source_id],
-            sourceFindings=[{"id": source_id, "finding": original}],
-        )
-        writeup = finding.get("writeup")
-        if isinstance(writeup, dict):
-            report = Path(writeup["reportPath"])
-            source_directory = child_dir / report.parent
-            source_names = {
-                unicodedata.normalize("NFC", path.name).upper()
-                for path in source_directory.iterdir()
-            }
-            base_slug = f"{child['id']}-{report.parent.name}"
-            slug = base_slug
-            suffix = 2
-            while f"{slug}.md".upper() in source_names or (
-                slug != base_slug and slug.upper() in reserved_slugs
-            ):
-                slug = f"{base_slug}-{suffix}"
-                suffix += 1
-            writeup["reportPath"] = f"findings/{slug}/{slug}.md"
-            for path in source_directory.rglob("*"):
-                if path.is_dir():
-                    continue
-                relative = path.relative_to(child_dir).as_posix()
-                destination = (
-                    writeup["reportPath"]
-                    if relative == report.as_posix()
-                    else f"findings/{slug}/{path.relative_to(source_directory).as_posix()}"
-                )
-                with os.fdopen(
-                    open_scan_local_file_descriptor(
-                        child_dir,
-                        relative,
-                        "Saved finding writeup",
-                    ),
-                    "rb",
-                ) as handle:
-                    write_scan_local_bytes(scan_dir, destination, handle.read())
-    for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
-        for row in coverage.get(field, []):
-            if not isinstance(row, dict):
-                continue
-            if isinstance(row.get("id"), str):
-                row["id"] = f"{child['id']}/{row['id']}"
-            if isinstance(row.get("candidateId"), str):
-                row["sourceCandidateId"] = row["candidateId"]
-                row["candidateId"] = (
-                    f"{child['id']}:{hashlib.sha256(row['candidateId'].encode()).hexdigest()}"
-                )
-            if isinstance(row.get("surfaceIds"), list):
-                row["surfaceIds"] = [f"{child['id']}/{value}" for value in row["surfaceIds"]]
-            if isinstance(row.get("receiptRefs"), list):
-                row["receiptRefs"] = [f"{prefix}/{value}" for value in row["receiptRefs"]]
-    return {"findings": findings["findings"], "coverage": coverage}
+        provenance["sourceFindings"] = [
+            {"id": f"{child['id']}:{index}", "finding": projected["sourceFindings"][index]}
+        ]
+    return {"findings": draft["findings"], "coverage": draft["coverage"]}
 
 
 def save_composed_checkpoint(

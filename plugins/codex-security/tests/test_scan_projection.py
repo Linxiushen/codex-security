@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 from test_workbench_scan_composition import register
 from workbench_test_support import run_workbench, write_completed_contract
 
 
-def test_stopped_projection_shared_fixture(tmp_path, workbench_api, monkeypatch):
+@pytest.fixture
+def projection_fixture(tmp_path):
     target = tmp_path / "target"
     for name in ("src/extract.py", "shared/control.py", "outside.py"):
         path = target / name
@@ -43,7 +47,55 @@ def test_stopped_projection_shared_fixture(tmp_path, workbench_api, monkeypatch)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents)
     run_workbench(state, "complete-scan", "--scan-id", child["scanId"])
+    return state, parent_dir, parent, child_dir, child, fixture
+
+
+def completed_projection(parent_dir, parent, child_dir, child, **overrides):
+    identity = parent_dir.stat()
+    request = {
+        "parentScanId": parent["scanId"],
+        "sourceScanId": child["scanId"],
+        "sourceDirectory": str(child_dir),
+        "parentDirectory": str(parent_dir),
+        "expectedParentIdentity": {"dev": str(identity.st_dev), "ino": str(identity.st_ino)},
+        **overrides,
+    }
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-X",
+            "utf8",
+            "-B",
+            str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"),
+        ],
+        input=json.dumps(request),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_stopped_projection_shared_fixture(projection_fixture, workbench_api, monkeypatch):
+    state, parent_dir, parent, child_dir, child, fixture = projection_fixture
     originals = json.loads((child_dir / "findings.json").read_text())["findings"]
+    completed = completed_projection(parent_dir, parent, child_dir, child)
+    assert completed.returncode == 0, completed.stderr
+    live = json.loads(completed.stdout)
+    assert live["scanId"] == child["scanId"]
+    assert live["scanDir"] == str(child_dir)
+    assert live["sourceFindings"] == [
+        originals[index] for index in fixture["expected"]["sourceFindingIndexes"]
+    ]
+    assert live["draft"]["coverage"] == fixture["expected"]["coverage"]
+    assert live["draft"]["scanId"] == parent["scanId"]
+    for finding, wanted in zip(
+        live["draft"]["findings"], fixture["expected"]["findings"], strict=True
+    ):
+        assert finding["identity"] == wanted["identity"]
+        assert finding["provenance"]["sourceFindingIds"] == wanted["sourceFindingIds"]
+        assert finding["provenance"]["extensions"] == {"fixture": "preserve-source-provenance"}
+        assert finding.get("writeup") == wanted.get("writeup")
     monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
     with workbench_api["connect"]() as connection:
         row = workbench_api["require_scan"](connection, child["scanId"])
@@ -70,3 +122,57 @@ def test_stopped_projection_shared_fixture(tmp_path, workbench_api, monkeypatch)
         assert (parent_dir / destination).read_bytes() == (child_dir / source).read_bytes()
     for name, contents in fixture["files"].items():
         assert (child_dir / name).read_text() == contents
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("sourceScanId", "wrong-child", "does not match"),
+        (
+            "expectedParentIdentity",
+            {"dev": "0", "ino": "0"},
+            "changed after artifact restoration setup",
+        ),
+    ],
+)
+def test_completed_projection_keeps_source_and_parent_binding(
+    projection_fixture, field, value, message
+):
+    _, parent_dir, parent, child_dir, child, _ = projection_fixture
+    completed = completed_projection(parent_dir, parent, child_dir, child, **{field: value})
+    assert completed.returncode != 0
+    assert message in completed.stderr
+    assert not (parent_dir / "findings").exists()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_completed_projection_rejects_symlink_evidence(projection_fixture, directory):
+    _, parent_dir, parent, child_dir, child, _ = projection_fixture
+    outside = parent_dir.parent / "outside-evidence.txt"
+    if directory:
+        outside.mkdir()
+        (outside / "evidence.txt").write_text("Outside directory evidence")
+    else:
+        outside.write_text("Evidence outside the child must not be projected.")
+    (child_dir / "findings/check/unsafe.txt").symlink_to(outside, target_is_directory=directory)
+    completed = completed_projection(parent_dir, parent, child_dir, child)
+    assert completed.returncode != 0
+    assert "inside the scan directory" in completed.stderr
+    assert not list((parent_dir / "findings").glob("*/unsafe.txt"))
+
+
+@pytest.mark.parametrize("terminal", ["unsealed", "interrupted"])
+def test_completed_projection_requires_completed_seal(projection_fixture, terminal):
+    _, parent_dir, parent, child_dir, child, _ = projection_fixture
+    path = child_dir / "scan-manifest.json"
+    manifest = json.loads(path.read_text())
+    if terminal == "unsealed":
+        manifest["scan"].pop("sealedAt")
+        manifest["scan"].pop("artifacts")
+    else:
+        manifest["scan"]["status"] = "interrupted"
+    path.write_text(json.dumps(manifest))
+    completed = completed_projection(parent_dir, parent, child_dir, child)
+    assert completed.returncode != 0
+    assert "Only a sealed completed scan" in completed.stderr
+    assert not (parent_dir / "findings").exists()
