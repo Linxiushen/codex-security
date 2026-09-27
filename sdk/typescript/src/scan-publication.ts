@@ -4,7 +4,10 @@ import {
   prepareSemanticScanDraft,
   type SemanticScan,
 } from "./scan-semantics.js";
-import type { ScanArtifactRestorer } from "./runtime.js";
+import type {
+  ScanArtifactRestorer,
+  prepareScanArtifactRestorer,
+} from "./runtime.js";
 import {
   loadContract,
   readScanFile,
@@ -172,7 +175,10 @@ export async function writeSemanticScanDraft(
   options: {
     scanDir: string;
     contract: Parameters<typeof prepareSemanticScanDraft>[0];
-    writer: ScanArtifactRestorer;
+    writer: Pick<
+      Awaited<ReturnType<typeof prepareScanArtifactRestorer>>,
+      "restore" | "remove"
+    >;
     workbench: (args: readonly string[]) => Promise<unknown>;
     onCleanupError: (error: unknown) => void;
   },
