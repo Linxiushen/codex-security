@@ -16,6 +16,7 @@
 - upgrade Codex CLI and SDK to 0.157.1 ([#1041](https://github.com/openai/codex-security/pull/1041))
 - honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
 - calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
+- preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
