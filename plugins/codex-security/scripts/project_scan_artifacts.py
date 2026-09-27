@@ -6,6 +6,7 @@ Callers retain ownership of semantic merge decisions and provisional identities.
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import json
@@ -218,6 +219,7 @@ def project_completed_scan(request: ProjectionRequest) -> ProjectedScan:
 
 
 if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
     try:
         result = project_completed_scan(json.load(sys.stdin))
         json.dump(result, sys.stdout, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
