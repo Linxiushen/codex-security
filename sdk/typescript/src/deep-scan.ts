@@ -31,8 +31,20 @@ export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
 
-/** No composition accounting or execution is resumed for a terminal checkpoint. */
-export class TerminalDeepScanError extends ScanInterruptedError {}
+/** A terminal checkpoint rejects execution while retaining read-only accounting. */
+export class TerminalDeepScanError extends ScanInterruptedError {
+  constructor(
+    message: string,
+    scanDir: string,
+    readonly accounting: {
+      constituents: ReadonlyArray<Readonly<ScanCost> | null> | null;
+      savedTotal: Readonly<ScanCost> | null;
+      legacyThreadId?: string;
+    },
+  ) {
+    super(message, scanDir);
+  }
+}
 
 export interface DeepScanCheckpoint {
   version: 2;
@@ -89,14 +101,11 @@ export interface DeepScanComposition {
   historicalCost?(threadId: string): Promise<ScanCost | null>;
 }
 
-/** Compose complete ordinary scans; only accepted merge state belongs to the parent. */
-export async function runDeepScans(
-  input: DeepScanComposition,
-): Promise<DeepScanCheckpoint> {
-  const { scanId, scanDir, settings, signal, workbench } = input;
-  let state: DeepScanCheckpoint;
+async function readCheckpoint(
+  scanDir: string,
+): Promise<DeepScanCheckpoint | undefined> {
   try {
-    state = JSON.parse(
+    return JSON.parse(
       (
         await readScanFile(
           scanDir,
@@ -117,29 +126,130 @@ export async function runDeepScans(
       )
     )
       throw error;
-    state = {
-      version: 2,
-      startedAt: input.startedAt,
-      passes: [],
-      mergedScanIds: [],
-      aggregate: null,
-      noNewStreak: 0,
-      consecutiveErrors: 0,
-    };
+    return undefined;
   }
-  if (state.version !== 2)
-    throw new Error("Unsupported saved Deep Scan checkpoint.");
-  if (state.terminalReason === "failed" || state.terminalReason === "canceled")
-    throw new TerminalDeepScanError(
-      `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
-      scanDir,
-    );
-  const passDirectory = (index: number): string =>
-    `artifacts/deep-scan/passes/pass-${index + 1}`;
+}
+
+function passDirectory(index: number): string {
+  return `artifacts/deep-scan/passes/pass-${index + 1}`;
+}
+
+function validatePassDirectories(state: DeepScanCheckpoint): void {
   for (const [index, pass] of state.passes.entries()) {
     if (pass.directory !== passDirectory(index))
       throw new Error("Saved scan pass escaped its parent.");
   }
+}
+
+function savedPassIndex(
+  input: Pick<DeepScanComposition, "scanId" | "scanDir" | "repository">,
+  state: DeepScanCheckpoint,
+  record: SavedPass,
+): number {
+  const index = state.passes.findIndex(
+    (pass) =>
+      relative(join(input.scanDir, pass.directory), record.scanDir) === "",
+  );
+  if (index < 0) return index;
+  if (
+    record.parentScanId !== input.scanId ||
+    record.targetPath !== input.repository
+  )
+    throw new Error("Saved scan pass belongs to another parent or target.");
+  const pass = state.passes[index]!;
+  if (pass.scanId !== undefined && pass.scanId !== record.scanId)
+    throw new Error("Saved scan pass registration changed.");
+  return index;
+}
+
+/** Reject stopped discovery without writes, worker startup or cost notifications. */
+export async function terminalDeepScanError(
+  input: Pick<
+    DeepScanComposition,
+    "scanId" | "scanDir" | "repository" | "workbench" | "historicalCost"
+  >,
+  checkpoint?: DeepScanCheckpoint,
+): Promise<TerminalDeepScanError | null> {
+  const state = checkpoint ?? (await readCheckpoint(input.scanDir));
+  if (
+    state?.version !== 2 ||
+    (state.terminalReason !== "failed" && state.terminalReason !== "canceled")
+  )
+    return null;
+  let savedTotal: ScanCost | null = null;
+  let constituents: Array<Readonly<ScanCost> | null> | null = null;
+  try {
+    const saved = await input.workbench([
+      "get-scan",
+      "--scan-id",
+      input.scanId,
+    ]);
+    savedTotal =
+      ((saved["scan"] as JsonObject)["cost"] as unknown as
+        ScanCost | undefined) ?? null;
+    validatePassDirectories(state);
+    const listed = await input.workbench([
+      "list-scans",
+      "--scan-root",
+      join(input.scanDir, "artifacts/deep-scan/passes"),
+    ]);
+    // A reserved slot cannot incur cost until its registration succeeds.
+    const costs: Array<Readonly<ScanCost> | null | undefined> =
+      state.passes.map((pass) =>
+        pass.scanId === undefined ? undefined : null,
+      );
+    for (const record of listed["scans"] as unknown as SavedPass[]) {
+      const index = savedPassIndex(input, state, record);
+      if (index >= 0)
+        costs[index] =
+          record.cost ??
+          (record.progress.status === "failed" && !record.continuationThreadId
+            ? undefined
+            : null);
+    }
+    if (state.legacy) {
+      costs.push(
+        state.legacy.cost ??
+          (state.legacy.originThreadId
+            ? await input.historicalCost?.(state.legacy.originThreadId)
+            : null) ??
+          null,
+      );
+    }
+    constituents = costs.filter((cost) => cost !== undefined);
+  } catch {
+    // Optional accounting must not replace the terminal rejection or a known total.
+  }
+  return new TerminalDeepScanError(
+    `The saved Deep Scan is ${state.terminalReason}; its retained results remain available.`,
+    input.scanDir,
+    {
+      constituents,
+      savedTotal,
+      legacyThreadId: state.legacy?.originThreadId,
+    },
+  );
+}
+
+/** Compose complete ordinary scans; only accepted merge state belongs to the parent. */
+export async function runDeepScans(
+  input: DeepScanComposition,
+): Promise<DeepScanCheckpoint> {
+  const { scanId, scanDir, settings, signal, workbench } = input;
+  const state: DeepScanCheckpoint = (await readCheckpoint(scanDir)) ?? {
+    version: 2,
+    startedAt: input.startedAt,
+    passes: [],
+    mergedScanIds: [],
+    aggregate: null,
+    noNewStreak: 0,
+    consecutiveErrors: 0,
+  };
+  if (state.version !== 2)
+    throw new Error("Unsupported saved Deep Scan checkpoint.");
+  const terminal = await terminalDeepScanError(input, state);
+  if (terminal !== null) throw terminal;
+  validatePassDirectories(state);
   let saveTail = Promise.resolve();
   let savedSnapshot: string | undefined;
   let queuedSave: { snapshot: string; pending: Promise<void> } | undefined;
@@ -214,21 +324,9 @@ export async function runDeepScans(
       );
     let recoveredSuccess = false;
     for (const record of records) {
-      const index = state.passes.findIndex(
-        (pass) =>
-          relative(join(scanDir, pass.directory), record.scanDir) === "",
-      );
+      const index = savedPassIndex(input, state, record);
       if (index < 0) continue;
-      if (
-        record.parentScanId !== scanId ||
-        record.targetPath !== input.repository
-      ) {
-        throw new Error("Saved scan pass belongs to another parent or target.");
-      }
       const pass = state.passes[index]!;
-      if (pass.scanId !== undefined && pass.scanId !== record.scanId) {
-        throw new Error("Saved scan pass registration changed.");
-      }
       pass.scanId = record.scanId;
       if (
         recoverOutcomes &&

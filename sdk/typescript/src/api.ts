@@ -16,6 +16,7 @@ import {
   runDeepScans,
   ScanCostTrackingError,
   TerminalDeepScanError,
+  terminalDeepScanError,
   type DeepScanCheckpoint,
 } from "./deep-scan.js";
 import {
@@ -1261,6 +1262,7 @@ export class CodexSecurity {
     let artifactRestorationFailure: OutputDirectoryError | null = null;
     let customValidationComplete = false;
     let completionCost: ScanCost | null = null;
+    let terminalMergeCost: ScanCost | null | undefined;
     let budgetRecovery: {
       expectation: ScanExpectation;
       pluginRoot: string;
@@ -1832,26 +1834,6 @@ export class CodexSecurity {
           );
         }
       }
-      if (
-        typeof registration["sealedProducerVersion"] !== "string" &&
-        typeof resumeThreadId === "string"
-      ) {
-        const savedSession = await findScanSession(
-          runtime.codexHome,
-          resumeThreadId,
-        );
-        if (
-          savedSession === null ||
-          savedSession.workingDirectory !==
-            (mode === "deep"
-              ? join(scanDir, "artifacts", "deep-scan", "merge")
-              : scanDir)
-        ) {
-          throw new CodexSecurityError(
-            `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
-          );
-        }
-      }
       if (typeof registration["sealedProducerVersion"] === "string") {
         expectation.pluginVersion = registration["sealedProducerVersion"];
       }
@@ -1984,6 +1966,64 @@ export class CodexSecurity {
             scanDir,
           );
       } else {
+        if (
+          mode === "deep" &&
+          (options.resumeScanId !== undefined ||
+            options.registeredScan !== undefined)
+        ) {
+          const readHistoricalCost = async (
+            threadId: string,
+            scanDirectory?: string,
+          ) => {
+            const historical = new ScanCostTracker({
+              codexHome: runtime.codexHome,
+              model,
+              repository: repo,
+              scanDirectory,
+            });
+            historical.start(threadId);
+            return (await historical.stop()).cost;
+          };
+          const terminal = await terminalDeepScanError({
+            scanId,
+            scanDir,
+            repository: repo,
+            workbench: (args) => workbench(workbenchOptions, args),
+            historicalCost: readHistoricalCost,
+          });
+          if (terminal !== null) {
+            const { constituents } = terminal.accounting;
+            if (
+              constituents !== null &&
+              typeof resumeThreadId === "string" &&
+              resumeThreadId !== terminal.accounting.legacyThreadId
+            ) {
+              terminalMergeCost = await readHistoricalCost(
+                resumeThreadId,
+                join(scanDir, "artifacts/deep-scan/merge"),
+              ).catch(() => null);
+            }
+            activeScan = { id: scanId, options: workbenchOptions };
+            throw terminal;
+          }
+        }
+        if (typeof resumeThreadId === "string") {
+          const savedSession = await findScanSession(
+            runtime.codexHome,
+            resumeThreadId,
+          );
+          if (
+            savedSession === null ||
+            savedSession.workingDirectory !==
+              (mode === "deep"
+                ? join(scanDir, "artifacts", "deep-scan", "merge")
+                : scanDir)
+          ) {
+            throw new CodexSecurityError(
+              `The original Codex session for scan ${scanId} is unavailable. Restore its session logs in the original Codex Security state directory before resuming.`,
+            );
+          }
+        }
         if (
           mode === "deep" &&
           options.maxCostUsd !== undefined &&
@@ -3045,11 +3085,34 @@ export class CodexSecurity {
           this.#abortController.signal.aborted) &&
         isCancellationDerivedFailure(failure, signal);
 
+      let terminalCost: Readonly<ScanCost> | null = null;
+      if (error instanceof TerminalDeepScanError) {
+        const { constituents, savedTotal } = error.accounting;
+        terminalCost = savedTotal;
+        const costs =
+          constituents === null
+            ? null
+            : [
+                ...constituents,
+                ...(terminalMergeCost === undefined ? [] : [terminalMergeCost]),
+              ];
+        if (costs !== null && !costs.includes(null)) {
+          const recovered = costs.reduce<ScanCost | null>(
+            (total, cost) =>
+              cost === null ? total : addScanCosts(total, cost),
+            tracked?.cost ?? null,
+          );
+          if (
+            recovered &&
+            (!terminalCost ||
+              recovered.estimatedUsd > terminalCost.estimatedUsd)
+          )
+            terminalCost = recovered;
+        }
+      }
       const preservedCost =
-        // A rejected terminal checkpoint never loaded its child/legacy costs.
-        // Leave the saved aggregate total intact when marking its record failed.
         error instanceof TerminalDeepScanError
-          ? null
+          ? terminalCost
           : options.mode === "deep"
             ? (completionCost ??
               (tracked?.cost ? completeCost(tracked.cost) : null))

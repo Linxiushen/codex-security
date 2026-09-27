@@ -524,36 +524,174 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
-test.each(["failed", "canceled"] as const)(
-  "rejecting a %s checkpoint preserves the saved child and merge cost total",
-  async (terminalReason) => {
-    const childCost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 100_000,
-      output_tokens: 10_000,
-    })!;
-    const savedCost = estimateScanCost("gpt-5.6-sol", {
-      input_tokens: 101_000,
-      output_tokens: 10_100,
-    })!;
+test.each(
+  (["failed", "canceled"] as const).flatMap((terminalReason) =>
+    (
+      [
+        ["absent", "complete"],
+        ["stale", "complete"],
+        ["exact", "complete"],
+        ["larger", "complete"],
+        ["absent", "unknown-child"],
+        ["larger", "unknown-child"],
+        ["stale", "running-child"],
+        ["larger", "unknown-merge"],
+        ["larger", "unavailable"],
+        ["larger", "parent-unavailable"],
+        ["larger", "unknown-legacy"],
+        ["larger", "mismatched-child"],
+        ["larger", "missing-child"],
+        ["absent", "legacy-saved"],
+        ["absent", "legacy-current"],
+        ["absent", "legacy-logs"],
+      ] as const
+    ).map(
+      ([saved, accounting]) => [terminalReason, saved, accounting] as const,
+    ),
+  ),
+)(
+  "rejecting a %s checkpoint reconciles %s saved cost with %s accounting",
+  async (terminalReason, saved, accounting) => {
+    const cost = (input_tokens: number, output_tokens: number) =>
+      estimateScanCost("gpt-5.6-sol", { input_tokens, output_tokens })!;
+    const childCost =
+      accounting === "unknown-child" ? undefined : cost(100_000, 10_000);
+    const legacy =
+      accounting === "legacy-saved" ||
+      accounting === "legacy-logs" ||
+      accounting === "legacy-current" ||
+      accounting === "unknown-legacy";
+    const separateLegacy = legacy && accounting !== "legacy-current";
+    const recoveredCost = cost(
+      separateLegacy ? 103_000 : 101_000,
+      separateLegacy ? 10_300 : 10_100,
+    );
+    const savedCost =
+      saved === "absent"
+        ? undefined
+        : saved === "stale"
+          ? cost(1_000, 100)
+          : saved === "larger"
+            ? cost(200_000, 20_000)
+            : recoveredCost;
+    const complete =
+      accounting === "complete" || (legacy && accounting !== "unknown-legacy");
+    const expectedCost =
+      complete && saved !== "larger" ? recoveredCost : savedCost;
     const f = await interruptedScan("deep", false, {}, false, true, {
       cost: childCost,
     });
-    await appendFile(
-      f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 1_000, output_tokens: 100 },
+    // Give independent child and merge sessions overlapping lifetimes. Merge
+    // accounting must not include the child a second time through its directory.
+    const writeUsage = async (
+      path: string,
+      id: string,
+      cwd: string,
+      inputTokens: number,
+      outputTokens: number,
+    ) => {
+      await writeFile(
+        path,
+        [
+          {
+            type: "session_meta",
+            payload: { id, cwd, timestamp: "2026-01-01T00:00:00Z" },
           },
-        },
-      }) + "\n",
+          {
+            type: "event_msg",
+            payload: {
+              type: "token_count",
+              info: {
+                total_token_usage: {
+                  input_tokens: inputTokens,
+                  output_tokens: outputTokens,
+                },
+              },
+            },
+          },
+        ]
+          .map((event) => JSON.stringify(event))
+          .join("\n") + "\n",
+      );
+    };
+    await writeUsage(
+      f.sessionPath,
+      f.threadId,
+      join(f.scanDir, "artifacts/deep-scan/merge"),
+      1_000,
+      100,
     );
+    const childThreadId = randomUUID();
+    await writeUsage(
+      join(f.codexHome, "sessions", `rollout-${childThreadId}.jsonl`),
+      childThreadId,
+      f.childDir!,
+      100_000,
+      10_000,
+    );
+    if (accounting === "unknown-merge") await rm(f.sessionPath);
+    const checkpointPath = join(f.scanDir, DEEP_SCAN_CHECKPOINT);
     const checkpoint = JSON.parse(
-      await readFile(join(f.scanDir, DEEP_SCAN_CHECKPOINT), "utf8"),
+      await readFile(checkpointPath, "utf8"),
     ) as DeepScanCheckpoint;
     checkpoint.terminalReason = terminalReason;
+    if (
+      (saved === "absent" && accounting === "complete") ||
+      accounting === "running-child"
+    ) {
+      const directory = "artifacts/deep-scan/passes/pass-2";
+      await mkdir(join(f.scanDir, directory), { recursive: true, mode: 0o700 });
+      const registration = await f.command(
+        [
+          "register-cli-scan",
+          "--repository",
+          f.repository,
+          "--scan-dir",
+          join(f.scanDir, directory),
+          "--parent-scan-id",
+          f.scanId,
+          "--registration-json-stdin",
+        ],
+        JSON.stringify({ recipe: { ...f.recipe, mode: "standard" } }),
+      );
+      const scanId = registration["scanId"] as string;
+      if (accounting !== "running-child")
+        await f.command([
+          "fail-scan",
+          "--scan-id",
+          scanId,
+          "--defer-publication",
+          "--message",
+          "Synthetic failure before session startup.",
+        ]);
+      checkpoint.passes.push(
+        { directory, scanId },
+        { directory: "artifacts/deep-scan/passes/pass-3" },
+      );
+    }
+    if (legacy) {
+      const legacyThreadId =
+        accounting === "legacy-current" ? f.threadId : randomUUID();
+      checkpoint.legacy = {
+        discoveryRuns: 1,
+        coverage: {},
+        originThreadId: legacyThreadId,
+        ...(accounting === "legacy-saved"
+          ? { cost: cost(2_000, 200) }
+          : accounting === "legacy-current"
+            ? { cost: cost(1_000, 100) }
+            : {}),
+      };
+      if (accounting === "legacy-logs") {
+        await writeUsage(
+          join(f.codexHome, "sessions", `rollout-${legacyThreadId}.jsonl`),
+          legacyThreadId,
+          join(f.scanDir, "artifacts"),
+          2_000,
+          200,
+        );
+      }
+    }
     await f.command(
       [
         "save-scan-artifact",
@@ -564,41 +702,52 @@ test.each(["failed", "canceled"] as const)(
       ],
       JSON.stringify(checkpoint),
     );
-    // Transport interruption preserves the accumulated cost while the DB record
-    // remains running, even after the checkpoint has durably stopped discovery.
-    await f.command([
-      "preserve-scan-results",
-      "--scan-id",
-      f.scanId,
-      "--cost-json",
-      JSON.stringify(savedCost),
-    ]);
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({ progress: { status: "running" }, cost: savedCost });
+    // The terminal checkpoint can reach disk before the aggregate cost DB write.
+    if (savedCost)
+      await f.command([
+        "preserve-scan-results",
+        "--scan-id",
+        f.scanId,
+        "--cost-json",
+        JSON.stringify(savedCost),
+      ]);
+    const paths = [
+      checkpointPath,
+      f.checkpoint,
+      ...[
+        "scan-manifest.json",
+        "findings.json",
+        "coverage.json",
+        "report.md",
+      ].map((name) => join(f.childDir!, name)),
+    ];
+    const artifacts = await Promise.all(paths.map((path) => readFile(path)));
     const calls: string[][] = [];
-    let turns = 0;
+    const clients: unknown[] = [];
+    const notifications: string[] = [];
     const client = resumeClient(
       f,
-      () => ({
-        startThread() {
-          throw new Error("A terminal scan must not start a worker.");
-        },
-        resumeThread(threadId) {
-          return {
-            id: threadId,
-            async runStreamed() {
-              turns += 1;
-              throw new Error(
-                "A terminal scan must not run another model turn.",
-              );
-            },
-          };
-        },
-      }),
+      (options) => {
+        clients.push(options);
+        throw new Error(
+          "A terminal scan must not create a worker or run another model turn.",
+        );
+      },
       async (options, args, input) => {
-        if (args[0] === "fail-scan") calls.push([...args]);
-        return await runWorkbench(options, args, input);
+        calls.push([...args]);
+        if (
+          (args[0] === "list-scans" && accounting === "unavailable") ||
+          (args[0] === "get-scan" && accounting === "parent-unavailable")
+        )
+          throw new Error("Optional accounting is unavailable.");
+        const result = await runWorkbench(options, args, input);
+        if (args[0] === "list-scans" && accounting === "mismatched-child") {
+          const scans = result["scans"] as JsonObject[];
+          scans[0]!["parentScanId"] = randomUUID();
+        }
+        if (args[0] === "list-scans" && accounting === "missing-child")
+          result["scans"] = [];
+        return result;
       },
     )({ codexOverrides: f.recipe.config });
     try {
@@ -607,17 +756,58 @@ test.each(["failed", "canceled"] as const)(
           mode: "deep",
           outputDir: f.scanDir,
           resumeScanId: f.scanId,
+          maxCostUsd: 0.001,
+          onCost() {
+            notifications.push("cost");
+          },
+          onActivity() {
+            notifications.push("activity");
+          },
+          onSessionEvent() {
+            notifications.push("session");
+          },
+          onBudgetApproaching() {
+            notifications.push("budget");
+          },
         }),
       ).rejects.toBeInstanceOf(TerminalDeepScanError);
-      expect(turns).toBe(0);
-      expect(calls).toHaveLength(1);
-      expect(calls[0]).not.toContain("--cost-json");
-      expect(
-        (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-      ).toMatchObject({ progress: { status: "failed" }, cost: savedCost });
-      expect(
-        (await f.command(["get-scan", "--scan-id", f.childId!]))["scan"],
-      ).toMatchObject({ progress: { status: "complete" }, cost: childCost });
+      expect(clients).toEqual([]);
+      expect(notifications).toEqual([]);
+      const failures = calls.filter(([command]) => command === "fail-scan");
+      expect(failures).toHaveLength(1);
+      expect(failures[0]!.includes("--cost-json")).toBe(
+        expectedCost !== undefined && accounting !== "parent-unavailable",
+      );
+      expect(calls.map(([command]) => command)).not.toContain(
+        "save-scan-artifact",
+      );
+      expect(calls.map(([command]) => command)).not.toContain(
+        "prepare-scan-completion",
+      );
+      expect(await Promise.all(paths.map((path) => readFile(path)))).toEqual(
+        artifacts,
+      );
+      const parent = (await f.command(["get-scan", "--scan-id", f.scanId]))[
+        "scan"
+      ] as JsonObject;
+      expect(parent).toMatchObject({ progress: { status: "failed" } });
+      if (expectedCost) {
+        expect(parent["cost"]).toMatchObject({
+          inputTokens: expectedCost.inputTokens,
+          outputTokens: expectedCost.outputTokens,
+        });
+        expect((parent["cost"] as JsonObject)["estimatedUsd"]).toBeCloseTo(
+          expectedCost.estimatedUsd,
+          12,
+        );
+        if (saved === "larger")
+          expect(parent["cost"] as unknown).toEqual(savedCost!);
+      } else expect(parent["cost"]).toBeUndefined();
+      const child = (await f.command(["get-scan", "--scan-id", f.childId!]))[
+        "scan"
+      ] as JsonObject;
+      expect(child).toMatchObject({ progress: { status: "complete" } });
+      expect(child["cost"] as unknown).toEqual(childCost);
     } finally {
       await client.close();
     }
