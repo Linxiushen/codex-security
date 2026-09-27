@@ -17,6 +17,7 @@
 - honor the requested output format when rerunning a scan ([#203](https://github.com/openai/codex-security/pull/203))
 - calculate diff digests at completion ([#1040](https://github.com/openai/codex-security/pull/1040))
 - preserve trusted Git selection in workbench helpers ([#140](https://github.com/openai/codex-security/pull/140))
+- create private scan output directories ([#987](https://github.com/openai/codex-security/pull/987))
 <!-- release-section: highlights:end -->
 
 <!-- release-section: upgrades:start -->
