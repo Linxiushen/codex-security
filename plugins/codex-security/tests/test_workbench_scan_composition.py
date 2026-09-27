@@ -128,6 +128,42 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
     return value
 
 
+@pytest.mark.parametrize("name", ["current", "legacy"])
+def test_checkpoint_roundtrips_shared_sdk_fixtures(tmp_path, workbench_api, monkeypatch, name):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    scan = register(state, target, tmp_path / "scan", mode="deep")
+    fixture = Path(__file__).parent / "fixtures/composition-checkpoints" / f"{name}.json"
+    original = json.loads(fixture.read_text())
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        input_text=fixture.read_text(),
+    )
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    stored = {"id": scan["scanId"], "scan_dir": scan["scanDir"]}
+    loaded = workbench_api["read_composition_checkpoint"](stored)
+    assert loaded == original
+    encoded = workbench_api["saved_results"].encode_composition_checkpoint(loaded)
+    assert json.loads(encoded) == original
+    run_workbench(
+        state,
+        "save-scan-artifact",
+        "--scan-id",
+        scan["scanId"],
+        "--artifact-path",
+        CHECKPOINT,
+        input_text=encoded.decode(),
+    )
+    assert workbench_api["read_composition_checkpoint"](stored) == original
+
+
 def test_checkpoint_read_blocks_other_threads_and_atomic_writers(
     tmp_path: Path, workbench_api, monkeypatch: pytest.MonkeyPatch
 ) -> None:
