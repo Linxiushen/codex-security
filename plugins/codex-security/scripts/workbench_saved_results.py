@@ -199,15 +199,6 @@ def _validate_checkpoint_head(
     _read_saved_result(scan_dir, (directory / "checkpoints" / checkpoint).as_posix(), scan_id)
 
 
-def _checkpoint_head_observation(scan_dir: Path, relative: str, scan_id: str) -> dict[str, Any]:
-    head, _, metadata = _read_scan_local_json_with_metadata(
-        scan_dir, relative, "Saved checkpoint head"
-    )
-    directory = Path(relative).parent
-    _validate_checkpoint_head(scan_dir, directory, scan_id, head)
-    return {"checkpoint": head["checkpoint"], "observedAtNs": str(metadata.st_mtime_ns)}
-
-
 def _capture_saved_source(
     scan_dir: Path,
     relative: str,
@@ -220,7 +211,8 @@ def _capture_saved_source(
     if not snapshot_head or Path(relative).name != "checkpoint-head.json":
         _, digest, observed = _read_saved_result_observation(scan_dir, relative, scan_id, kind=kind)
         return {relative: (digest, observed)}
-    observation = _checkpoint_head_observation(scan_dir, relative, scan_id)
+    head, _, observed = _read_saved_result_observation(scan_dir, relative, scan_id)
+    observation = {"checkpoint": head["checkpoint"], "observedAtNs": str(observed)}
     directory = Path(relative).parent
     selected = (directory / "checkpoints" / observation["checkpoint"]).as_posix()
     _, selected_digest, selected_time = _read_saved_result_observation(scan_dir, selected, scan_id)
@@ -814,7 +806,6 @@ def _generic_surface_updates(
                 _validate_schema_node(update, surface_schema, "coverage.surfaces")
             except ContractError:
                 continue
-            replaced.add(id(surface))
             replaced.update(
                 id(row)
                 for _, row in matches
@@ -865,10 +856,9 @@ def merge_saved_results(
             if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
                 head_path = scan_dir / "checkpoint-head.json"
                 try:
-                    previous_head = _checkpoint_head_observation(
+                    previous_head, _, head_modified = _read_saved_result_observation(
                         scan_dir, "checkpoint-head.json", scan_id
                     )
-                    head_modified = int(previous_head["observedAtNs"])
                 except (ContractError, OSError, ValueError):
                     head_modified = None
                 tied_observations = False
@@ -1094,7 +1084,7 @@ def merge_saved_results(
                 parent = _merge_tied_parent_observations(parent, draft)
                 parent_is_canonical = False
     if parent is None and latest_reducer is not None:
-        parent = next((draft for relative, draft, _ in sources if relative == latest_reducer), None)
+        parent = drafts_by_path[latest_reducer]
 
     if parent is None and not sources:
         return None
@@ -1210,7 +1200,7 @@ def merge_saved_results(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
     )["properties"]
     for relative, draft, owner in all_sources:
-        order = (0, parent_modified) if relative == "parent" else source_order[relative]
+        order = source_order[relative]
         for item in deferred_rows[relative]:
             if not isinstance(item, dict):
                 continue
@@ -1270,27 +1260,6 @@ def merge_saved_results(
     }
     ordered_outcomes: dict[tuple[str | None, str], tuple[tuple[int, int], str]] = {}
 
-    # Reopened work and selected checkpoint outcomes follow the saved source order.
-    def record_candidate_outcome(
-        relative: str, owner: str | None, candidate_id: str, disposition: str
-    ) -> None:
-        key = (owner, candidate_id)
-        if key not in ordered_candidates:
-            if relative == "parent" or relative in current_results:
-                resolved.setdefault(key, disposition)
-            return
-        order = source_order[relative]
-        if any(
-            saved_owner == owner
-            and (row.get("candidateId") or row.get("id")) == candidate_id
-            and modified >= order
-            for (saved_owner, _), (modified, row, _) in active_deferred.items()
-        ):
-            return
-        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
-            resolved[key] = disposition
-            ordered_outcomes[key] = (order, relative)
-
     outcomes: list[tuple[str, str | None, str, str]] = []
     for relative, draft, owner in current_drafts:
         for finding in draft["findings"]:
@@ -1314,12 +1283,28 @@ def merge_saved_results(
         for relative, owner, candidate_id, _ in outcomes
         if owner is not None and relative in selected_observations
     )
-    for outcome in outcomes:
-        record_candidate_outcome(*outcome)
+    # Reopened work and selected checkpoint outcomes follow the saved source order.
+    for relative, owner, candidate_id, disposition in outcomes:
+        key = (owner, candidate_id)
+        if key not in ordered_candidates:
+            if relative == "parent" or relative in current_results:
+                resolved.setdefault(key, disposition)
+            continue
+        order = source_order[relative]
+        if any(
+            saved_owner == owner
+            and (row.get("candidateId") or row.get("id")) == candidate_id
+            and modified >= order
+            for (saved_owner, _), (modified, row, _) in active_deferred.items()
+        ):
+            continue
+        if key not in ordered_outcomes or order > ordered_outcomes[key][0]:
+            resolved[key] = disposition
+            ordered_outcomes[key] = (order, relative)
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
-    for draft in [parent] if parent else []:
-        for finding in draft["findings"]:
+    if parent:
+        for finding in parent["findings"]:
             if valid_finding(finding):
                 canonical_key = _finding_key(finding)
                 for retained in _retained_findings(finding):
@@ -1415,13 +1400,12 @@ def merge_saved_results(
             if worker_id is None and parent is not None
             else worker_result_order
         )
-        selected_deferred = (
-            {id(row) for row in deferred_rows[relative] if isinstance(row, dict)}
-            if superseded
+        retain_pending = (
+            superseded
             and (worker_id in headed_workers or (worker_id is None and parent_heads))
             and accepted_order is not None
             and source_order[relative] >= accepted_order
-            else set()
+            and any(isinstance(row, dict) for row in deferred_rows[relative])
         )
         if (
             (relative != "parent" or not parent_is_canonical)
@@ -1438,7 +1422,7 @@ def merge_saved_results(
             and not stopped
             and all(valid_finding(finding) for finding in (parent["findings"] if parent else []))
         )
-        if skip_superseded_findings and not selected_candidates and not selected_deferred:
+        if skip_superseded_findings and not selected_candidates and not retain_pending:
             continue
         if (
             not skip_superseded_findings
@@ -1476,7 +1460,6 @@ def merge_saved_results(
             if not isinstance(value, dict):
                 warnings.append(f"Retained malformed finding evidence in {relative}.")
                 continue
-            source_value = copy.deepcopy(value)
             finding = copy.deepcopy(value)
             candidate_id = finding_candidate_id(finding)
             if relative != "parent" and resolved.get((worker_id, candidate_id)) in {
@@ -1539,24 +1522,19 @@ def merge_saved_results(
                     historical_contents = set()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = (
-                        _digest(_finding_content(source_value)) in historical_contents
-                    )
+                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
             if key in finding_positions:
                 retained = findings[finding_positions[key]]
                 if finding != retained:
-                    if represented_by_parent:
-                        previous = copy.deepcopy(source_value)
-                        previous_history = previous.get("provenance", {}).pop(
-                            "previousFindings", []
-                        )
-                    elif _finding_strength(finding) > _finding_strength(retained):
+                    if not represented_by_parent and _finding_strength(finding) > _finding_strength(
+                        retained
+                    ):
                         previous = copy.deepcopy(retained)
                         previous_history = previous["provenance"].pop("previousFindings", [])
                         retained = finding
                         findings[finding_positions[key]] = retained
                     else:
-                        previous = copy.deepcopy(source_value)
+                        previous = copy.deepcopy(value)
                         previous_history = previous.get("provenance", {}).pop(
                             "previousFindings", []
                         )
@@ -1590,7 +1568,7 @@ def merge_saved_results(
                 continue
             finding_positions[key] = len(findings)
             findings.append(finding)
-        if superseded and not selected_candidates and not selected_deferred:
+        if superseded and not selected_candidates and not retain_pending:
             continue
         for field in ("surfaces", "explicitExclusions", "deferred", "openQuestions"):
             if superseded and field not in {"surfaces", "explicitExclusions", "deferred"}:
@@ -1610,7 +1588,7 @@ def merge_saved_results(
                 if superseded and not (
                     isinstance(item, dict)
                     and (
-                        (field == "deferred" and id(item) in selected_deferred)
+                        (field == "deferred" and retain_pending)
                         or (
                             isinstance(item.get("candidateId"), str)
                             and item["candidateId"] in selected_candidates

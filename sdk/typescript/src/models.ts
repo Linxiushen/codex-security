@@ -313,7 +313,7 @@ export interface CoverageDocument {
     [k: string]: unknown;
   }[];
   /**
-   * Resolved generic deferred work, identified by its explicit saved deferred ID and completion reason.
+   * Completed generic review tasks, with their saved IDs and completion reasons.
    */
   resolvedDeferred?: {
     id: string;

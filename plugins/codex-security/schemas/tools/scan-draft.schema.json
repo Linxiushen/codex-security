@@ -788,7 +788,7 @@
           }
         },
         "resolvedDeferred": {
-          "description": "On terminal Standard or diff drafts, close generic work by its explicit saved deferred ID and completion reason. Update linked surfaces by their saved IDs. Candidate outcomes require findings or dispositions.",
+          "description": "On final Standard or diff drafts, close generic tasks by saved ID and completion reason. Reuse saved surface IDs for updates. Candidate tasks need findings or dispositions.",
           "type": "array",
           "items": {
             "type": "object",

@@ -420,7 +420,7 @@ async function preserveScanDraft(
       );
       if (reopenedIds.size > 0) acceptProgress = true;
       if (!acceptProgress) continue;
-      const { resolved } = reconcileDeferredSurfaces(
+      const resolved = reconcileDeferredSurfaces(
         progress.coverage,
         sources,
         reopenedIds,
@@ -761,7 +761,7 @@ function reconcileResolvedDeferred(
       ),
     ]),
   ];
-  const { resolved: resolvedSurfaces } = reconcileDeferredSurfaces(
+  const resolvedSurfaces = reconcileDeferredSurfaces(
     result.coverage,
     sources,
     closedDeferredIds,
@@ -783,11 +783,10 @@ function reconcileDeferredSurfaces(
   savedSources: SavedScanDraft[] = [],
   retainedFinal?: ScanDraftInput,
   reopenedIds: Set<string> = new Set(),
-): { resolved: Set<JsonObject>; updated: Set<JsonObject> } {
+): Set<JsonObject> {
   const resolved = new Set<JsonObject>();
-  const updated = new Set<JsonObject>();
   const workIds = new Set([...closedDeferredIds, ...reopenedIds]);
-  if (workIds.size === 0) return { resolved, updated };
+  if (workIds.size === 0) return resolved;
   const current = coverage.surfaces as JsonObject[];
   const inheritedSurfaces = inherited.flatMap((source) =>
     (source.coverage.surfaces as JsonObject[]).map((surface) => ({
@@ -879,7 +878,6 @@ function reconcileDeferredSurfaces(
     );
     if (saved) current.push(surface);
     else current[current.indexOf(original)] = surface;
-    updated.add(surface);
     for (const previous of previousSurfaces) {
       if (
         surface.disposition === "needs_follow_up" ||
@@ -888,7 +886,7 @@ function reconcileDeferredSurfaces(
         resolved.add(previous);
     }
   }
-  return { resolved, updated };
+  return resolved;
 }
 
 async function readCheckpointHead(
@@ -945,12 +943,8 @@ async function readCurrentCheckpoints(
   const head = await readCheckpointHead(context, "current");
   const checkpointHead = head?.checkpoint;
 
-  const checkpoints: Array<{
-    input: ScanDraftInput;
-    modifiedMs: number;
-    head: boolean;
-    name: string;
-  }> = [];
+  const checkpoints: Array<SavedScanDraft & { head: boolean; name: string }> =
+    [];
   for (const entry of await fs.readdir(canonicalCheckpointRoot, {
     withFileTypes: true,
   })) {
@@ -1024,13 +1018,12 @@ async function readPreviousScanDraft(
   if (context.layout === "worker") {
     const contents = await readOptionalArtifactText(context, ["result.json"]);
     return {
-      ...(contents === undefined
-        ? {}
-        : {
-            input: parsePersistedScanDraft(
+      input:
+        contents === undefined
+          ? undefined
+          : parsePersistedScanDraft(
               parseJsonObject(contents, "previous scan draft"),
             ),
-          }),
       digest: draftDigest([["result.json", contents]]),
       modifiedMs: Number(
         (await lstatIfExists(join(context.root, "result.json")))?.mtimeMs ?? 0,
@@ -1123,13 +1116,8 @@ async function readArchivedWorkerCheckpoints(
         "scan checkpoint: archived attempt escaped its worker directory.",
       );
     }
-    const drafts: Array<{
-      input: ScanDraftInput;
-      modifiedMs: number;
-      result: boolean;
-      head?: boolean;
-      name: string;
-    }> = [];
+    const drafts: Array<SavedScanDraft & { result: boolean; name: string }> =
+      [];
     const attemptContext = { ...context, root: attemptRoot };
     const head = await readCheckpointHead(attemptContext, "archived");
     let checkpointHead: ScanDraftInput | undefined;
