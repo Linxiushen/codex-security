@@ -12,12 +12,18 @@ from workbench_test_support import write_checkpoint
 
 
 @pytest.mark.parametrize("parent_surfaces", ["missing", "projected", "renamed", "no-parent"])
+@pytest.mark.parametrize("merge_state", ["buffered", "merging", "merged"])
 def test_missing_deferred_projection_links_first_duplicate_surface(
-    workbench_api, workbench_db, publication_scan, parent_surfaces
+    workbench_api, workbench_db, publication_scan, parent_surfaces, merge_state
 ):
     scan = publication_scan()
     result = add_worker(workbench_db, scan)
     worker_id = result.parent.name
+    with workbench_db:
+        workbench_db.execute(
+            "UPDATE deep_scan_workers SET merge_state = ? WHERE id = ?",
+            (merge_state, worker_id),
+        )
     surfaces = [
         {
             "id": "shared-surface",

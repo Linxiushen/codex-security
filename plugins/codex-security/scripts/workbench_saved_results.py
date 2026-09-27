@@ -1141,7 +1141,6 @@ def merge_saved_results(
         project_coverage = (
             worker is not None
             and worker["status"] == "succeeded"
-            and worker["merge_state"] == "merged"
             and worker["result_manifest_path"] == str(scan_dir / relative)
             and draft.get("complete") is not False
         )
