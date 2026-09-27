@@ -40,7 +40,7 @@ def resolve_scan_root(scan_root: str | None) -> Path:
 @contextmanager
 def scan_completion_lock(scan_id: str) -> Iterator[None]:
     lock_dir = state_dir() / "completion-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
+    create_private_directory(lock_dir)
     lock_path = lock_dir / f"{require_uuid(scan_id, 'scan-id')}.lock"
     key = (os.getpid(), lock_path)
     held = getattr(_completion_locks, "held", set())
@@ -107,3 +107,14 @@ def release_completion_file_lock(descriptor: int) -> None:
         return
     os.lseek(descriptor, 0, os.SEEK_SET)
     windows_file_lock.locking(descriptor, windows_file_lock.LK_UNLCK, 1)
+
+
+def create_private_directory(path: Path) -> None:
+    """Create missing directories privately without changing existing permissions."""
+    try:
+        path.mkdir(mode=0o700, exist_ok=True)
+    except FileNotFoundError:
+        if path.parent == path:
+            raise
+        create_private_directory(path.parent)
+        path.mkdir(mode=0o700, exist_ok=True)

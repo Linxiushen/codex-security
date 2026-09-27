@@ -234,6 +234,8 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       CODEX_CLI_PATH: process.execPath,
       SYNTHETIC_SCAN_SETTING: "inherited",
+      GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+      GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
       CODEX_SAFETY_IDENTIFIER: "ambient-identifier",
       ...(native ? { OPENAI_API_KEY: "synthetic-native-key" } : {}),
       ...(provider === undefined
@@ -1563,6 +1565,15 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
           await realpath(environment.CODEX_CLI_PATH),
         );
         expect(turn.environment["SYNTHETIC_SCAN_SETTING"]).toBe("inherited");
+        expect(turn.environment["CODEX_SECURITY_GIT"]).toMatch(
+          /git(?:\.exe)?$/iu,
+        );
+        expect(turn.environment["GIT_SSH_COMMAND"]).toBe(
+          environment.GIT_SSH_COMMAND,
+        );
+        expect(turn.environment["GIT_CONFIG_GLOBAL"]).toBe(
+          environment.GIT_CONFIG_GLOBAL,
+        );
         expect(turn.environment["CODEX_SAFETY_IDENTIFIER"]).toBe(
           native && !prepareNative ? "saved-native-identifier" : undefined,
         );

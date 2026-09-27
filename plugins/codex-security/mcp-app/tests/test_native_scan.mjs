@@ -109,7 +109,8 @@ function syntheticPermissionAppServer() {
     if (process.env.NATIVE_PROFILE_CAPTURE) fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   };
   capture({ kind: "preflight", argv, cwd: process.cwd(), marker: process.env.NATIVE_PROFILE_MARKER,
-    codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY });
+    codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
     const request = JSON.parse(line);
     capture({ kind: "request", method: request.method, params: request.params });
@@ -778,7 +779,8 @@ if (process.argv.includes("app-server")) {
 } else {
   const capture = (value) => fs.appendFileSync(process.env.NATIVE_PROFILE_CAPTURE, JSON.stringify(value) + "\\n");
   capture({ kind: "exec", argv: process.argv.slice(2), marker: process.env.NATIVE_PROFILE_MARKER,
-    codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY });
+    codex: process.env.CODEX_API_KEY, openai: process.env.OPENAI_API_KEY,
+    gitEnvironment: Object.fromEntries(["PATH", "CODEX_SECURITY_GIT", "GIT_SSH_COMMAND", "GIT_CONFIG_GLOBAL"].map(name => [name, process.env[name]])) });
   console.log(JSON.stringify({ type: "thread.started", thread_id: "synthetic-worker-thread" }));
   const scenario = fs.readFileSync(process.env.NATIVE_PROFILE_SCENARIO, "utf8").trim();
   if (scenario.startsWith("late-fallback")) {
@@ -824,6 +826,12 @@ if (process.argv.includes("app-server")) {
             `permissions.codex_security_comparison={extends=":read-only",filesystem={${JSON.stringify(join(root, "private"))}="deny"},network={enabled=false}}`,
           );
         }
+        const gitEnvironment = {
+          PATH: join(root, "selected tools"),
+          CODEX_SECURITY_GIT: join(root, "selected tools", "git"),
+          GIT_SSH_COMMAND: "synthetic-ssh --fixture",
+          GIT_CONFIG_GLOBAL: join(root, "operator.gitconfig"),
+        };
         const sdk = createPermissionCheckedCodex({
           codexPathOverride: executable,
           config: { ...config, default_permissions: ":read-only" },
@@ -835,6 +843,7 @@ if (process.argv.includes("app-server")) {
             NATIVE_PROFILE_CAPTURE: capture,
             NATIVE_PROFILE_SCENARIO: scenario,
             NATIVE_PROFILE_MARKER: role,
+            ...gitEnvironment,
           },
         });
         for (const resumed of [false, true]) {
@@ -871,6 +880,7 @@ if (process.argv.includes("app-server")) {
             'approval_policy="never"',
           );
           for (const process of [preflight, executed]) {
+            assert.deepEqual(process.gitEnvironment, gitEnvironment);
             assert.equal(process.marker, role);
             assert.equal(process.codex, "synthetic-final-key");
             assert.equal(process.openai, undefined);

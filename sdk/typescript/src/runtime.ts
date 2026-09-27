@@ -59,7 +59,10 @@ import {
   errorMessage,
 } from "./errors.js";
 import type { JsonObject } from "./config.js";
-import { resolveTrustedExecutable } from "./trusted-executable.js";
+import {
+  resolveTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 import {
   isWindowsUnsafePathComponent,
   windowsUnsafePathComponent,
@@ -2840,6 +2843,23 @@ export function pluginExecutionEnvironment(
     PYTHON: python,
     CODEX_CLI_PATH: resolveCodexCommand(environment).command,
   };
+}
+
+export function environmentWithGit(
+  environment: ProcessEnvironment,
+  git?: InspectedExecutable,
+): ProcessEnvironment {
+  if (git === undefined) return environment;
+  const result = { ...environment };
+  for (const name of Object.keys(result)) {
+    const normalized = name.toUpperCase();
+    if (normalized === "CODEX_SECURITY_GIT" || normalized === "PATH") {
+      delete result[name];
+    }
+  }
+  result["CODEX_SECURITY_GIT"] = git.executable ?? "";
+  result["PATH"] = git.environment["PATH"] ?? "";
+  return result;
 }
 
 export function pythonUtf8Environment(

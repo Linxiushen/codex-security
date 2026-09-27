@@ -71,19 +71,6 @@ def composition_child_ids(connection: sqlite3.Connection) -> set[str]:
     }
 
 
-def create_scan_directory(directory: Path) -> None:
-    """Create new output ancestors with the permissions required by the ordinary runner."""
-    missing = []
-    current = directory
-    while not current.exists():
-        missing.append(current)
-        if current == current.parent:
-            break
-        current = current.parent
-    for path in reversed(missing):
-        path.mkdir(mode=0o700, exist_ok=True)
-
-
 def safe_segment(value: str) -> str:
     segment = "".join(
         character if character.isalnum() or character in "._-" else "-" for character in value

@@ -197,6 +197,7 @@ import {
   prepareCodexSecurityCredentialHome,
   preserveCodexSecurityPluginRegistration,
   pluginExecutionEnvironment,
+  environmentWithGit,
   pluginMetadata,
   planOutputArchive,
   prepareScanArtifactRestorer,
@@ -223,6 +224,7 @@ import {
   enclosingGitWorktreeRoots,
   normalizeRepository,
   normalizeTarget,
+  gitMarkerRoot,
   repositoryRevision,
   resolveRepositoryPath,
   type NormalizedTarget,
@@ -231,6 +233,10 @@ import {
   validateCommittedDiffCheckout,
   validateMode,
 } from "./targets.js";
+import {
+  inspectTrustedExecutable,
+  type InspectedExecutable,
+} from "./trusted-executable.js";
 
 interface CodexThreadLike {
   readonly id: string | null;
@@ -1360,12 +1366,22 @@ export class CodexSecurity {
         runtimeHome,
         effectiveConfig,
         preflightConfig,
-        modelProvider,
         authentication,
         approvalPolicy,
         python,
       } = session;
       releaseCredentialHome = session.releaseCredentialHome;
+      let git: InspectedExecutable = {
+        executable: null,
+        environment: session.scanEnvironment,
+      };
+      for (const source of [repo, ...(knowledgeBase?.sources ?? [])]) {
+        git = await inspectTrustedExecutable(
+          "git",
+          git.environment,
+          (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+        );
+      }
       checkOpen();
       const scanOutputRoot =
         requestedOutput === null &&
@@ -1728,11 +1744,7 @@ export class CodexSecurity {
         python,
         pluginRoot: runtime.plugin.pluginRoot,
         environment: {
-          ...selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-          ),
+          ...environmentWithGit(git.environment, git),
           CODEX_SECURITY_STATE_DIR: stateDirectory,
         },
         signal,
@@ -2187,6 +2199,7 @@ export class CodexSecurity {
         undefined,
         [],
         mode === "deep" || options.deepScanPass === true,
+        git,
       );
       const threadOptions: ThreadOptions = {
         threadSource: CODEX_SECURITY_THREAD_SOURCES.scan,
@@ -2870,6 +2883,8 @@ export class CodexSecurity {
                   runtimePaths,
                   matcherConfig,
                   configOverrides,
+                  false,
+                  git,
                 );
                 return {
                   startThread(threadOptions) {
@@ -3023,6 +3038,8 @@ export class CodexSecurity {
       const transportClosed = signal.reason instanceof ScanTransportClosedError;
       const canceled =
         signal.aborted &&
+        (!costAbortController.signal.aborted ||
+          signal.reason !== costAbortController.signal.reason) &&
         (options.signal?.aborted === true ||
           this.#abortController.signal.aborted) &&
         isCancellationDerivedFailure(failure, signal);
@@ -3362,6 +3379,7 @@ export class CodexSecurity {
     config?: JsonObject,
     configOverrides: string[] = [],
     requirePermissions = false,
+    git?: InspectedExecutable,
   ): { codex: CodexClientLike; environment: ProcessEnvironment } {
     const {
       runtime,
@@ -3373,7 +3391,10 @@ export class CodexSecurity {
     } = session;
     const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
-      ...pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
+      ...environmentWithGit(
+        pluginExecutionEnvironment(python, withoutCodexHome(scanEnvironment)),
+        git,
+      ),
       ...(externalProvider === null
         ? {}
         : { [externalProvider.env_key]: apiKey! }),

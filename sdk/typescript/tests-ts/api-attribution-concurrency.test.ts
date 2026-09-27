@@ -1,5 +1,5 @@
-import { mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, symlink } from "node:fs/promises";
+import { delimiter, join } from "node:path";
 import type { CodexOptions, ThreadOptions } from "@openai/codex-sdk";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse as parseToml } from "smol-toml";
@@ -40,12 +40,24 @@ describe("delegated scan attribution", () => {
       const clients = await Promise.all(
         (["cli", "sdk"] as const).map(async (surface, index) => {
           const scanDirectory = join(root, `${surface}-scan`);
+          const gitDirectory = join(root, `${surface}-tools`);
+          await mkdir(gitDirectory);
+          const hostGit = Bun.which("git");
+          expect(hostGit).not.toBeNull();
+          const git = join(
+            gitDirectory,
+            process.platform === "win32" ? "git.exe" : "git",
+          );
+          await symlink(await realpath(hostGit!), git);
+          const expectedGitDirectory = await realpath(gitDirectory);
           await mkdir(scanDirectory, { mode: 0o700 });
           let registrations = 0;
           return new InternalCodexSecurity(
             { pluginPath: PLUGIN_ROOT },
             {
               environment: {
+                PATH: gitDirectory,
+                GIT_SSH_COMMAND: `synthetic-${surface}-ssh`,
                 CODEX_HOME: ambientHome,
                 CODEX_SECURITY_STATE_DIR: stateDirectory,
                 CODEX_SECURITY_SURFACE: "spoofed",
@@ -98,11 +110,30 @@ describe("delegated scan attribution", () => {
                         maximumActive = Math.max(maximumActive, active);
                         if (active === 2) releaseConcurrentScans();
                         try {
+                          const initialEnvironment = { ...options.env };
                           expect(options.env?.["CODEX_HOME"]).toBe(
                             credentialHome,
                           );
                           expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
                             surface,
+                          );
+                          expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(git);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).toContain(expectedGitDirectory);
+                          expect(
+                            options.env?.["PATH"]?.split(delimiter),
+                          ).not.toContain(
+                            join(
+                              root,
+                              `${surface === "cli" ? "sdk" : "cli"}-tools`,
+                            ),
+                          );
+                          expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+                            `synthetic-${surface}-ssh`,
+                          );
+                          expect(options.env).not.toHaveProperty(
+                            "OPENAI_API_KEY",
                           );
                           expect(options.config).toMatchObject({
                             responses_api_metadata: {
@@ -137,6 +168,7 @@ describe("delegated scan attribution", () => {
                           expect(options.env?.["CODEX_SECURITY_SURFACE"]).toBe(
                             surface,
                           );
+                          expect(options.env).toEqual(initialEnvironment);
                           const observed = new Error(
                             "delegated attribution observed",
                           );
