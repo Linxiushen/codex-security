@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { join, posix, relative, sep } from "node:path";
+import { join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import Ajv2020, { type ValidateFunction } from "ajv/dist/2020.js";
 import { readScanFile } from "./contract.js";
@@ -37,12 +37,26 @@ export function scanMergeInput(
   parentScanId: string,
 ): ScanMergeInput {
   const scanId = result.manifest.scan.id;
+  const includePaths = result.manifest.scan.scope.includePaths;
+  // POSIX containment is a normalized directory prefix comparison. Resolve
+  // scopes once, rather than computing a relative path for every pair.
+  // Windows keeps its native drive, UNC and case-insensitive comparisons.
+  const prefixes =
+    process.platform === "win32"
+      ? undefined
+      : includePaths.map((scope) => {
+          const path = resolve(scope);
+          return path.endsWith("/") ? path : `${path}/`;
+        });
   const findings = result.findings.findings.filter((finding) =>
-    finding.locations.some((location) =>
-      result.manifest.scan.scope.includePaths.some(
-        (scope) => !relativePathIsOutside(relative(scope, location.path)),
-      ),
-    ),
+    finding.locations.some((location) => {
+      if (prefixes === undefined)
+        return includePaths.some(
+          (scope) => !relativePathIsOutside(relative(scope, location.path)),
+        );
+      const path = `${resolve(location.path)}/`;
+      return prefixes.some((prefix) => path.startsWith(prefix));
+    }),
   );
   const draft = semanticScanDraft(
     parentScanId,
@@ -73,72 +87,125 @@ export async function projectScanMergeWriteups(
   signal?: AbortSignal,
 ): Promise<ScanMergeInput> {
   const projected = structuredClone(input);
-  const project = async (writeup: { reportPath: string }): Promise<void> => {
-    const reportPath = writeup.reportPath;
-    const sourceDirectory = posix.dirname(reportPath);
-    const slug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
-    const destination = `findings/${slug}/${slug}.md`;
-    // Validate the source report before enumerating its containing directory.
+  const running = new Map<string, Promise<void>>();
+  let sequence = 0;
+  let failure: { sequence: number; error: unknown } | undefined;
+  const failed = (index: number, error: unknown) => {
+    if (failure === undefined || index < failure.sequence)
+      failure = { sequence: index, error };
+  };
+  const collisionKey = (path: string) => path.normalize("NFC").toUpperCase();
+  const ready = async (key: string): Promise<boolean> => {
+    // Preserve overwrite order for aliases and file/directory collisions.
+    for (const [other, operation] of running) {
+      if (
+        key === other ||
+        key.startsWith(`${other}/`) ||
+        other.startsWith(`${key}/`)
+      )
+        await operation;
+    }
+    // One producer admits both reports and evidence. A slot covers the read
+    // and the entire write, so no ninth payload can be retained while waiting.
+    if (running.size === 8) await Promise.race(running.values());
+    signal?.throwIfAborted();
+    return failure === undefined;
+  };
+  const track = (key: string, operation: Promise<void>) => {
+    const index = sequence++;
+    running.set(
+      key,
+      operation
+        .catch((error: unknown) => failed(index, error))
+        .finally(() => running.delete(key)),
+    );
+  };
+  const copy = async (source: string, destination: string): Promise<void> => {
     await writer.restore(
       destination,
       await readScanFile(
         input.scanDir,
-        reportPath,
-        "Scan merge writeup",
+        source,
+        "Scan merge writeup evidence",
         signal,
       ),
     );
-    const pending = [sourceDirectory];
-    while (pending.length > 0) {
+  };
+  const startReport = async (
+    source: string,
+    destination: string,
+    key: string,
+  ) => {
+    const bytes = await readScanFile(
+      input.scanDir,
+      source,
+      "Scan merge writeup",
+      signal,
+    );
+    track(key, writer.restore(destination, bytes));
+  };
+  // Reuse only the current source of a destination, within this call. An
+  // intervening report alias must finish overwriting the entire prior tree.
+  const destinations = new Map<string, string>();
+  try {
+    reports: for (const finding of projected.draft.findings) {
+      const writeup = finding["writeup"] as { reportPath: string } | undefined;
+      if (writeup === undefined) continue;
       signal?.throwIfAborted();
-      const directory = pending.pop()!;
-      for (const entry of await readdir(join(input.scanDir, directory), {
-        withFileTypes: true,
-      })) {
-        const path = posix.join(directory, entry.name);
-        if (path === reportPath) continue;
-        if (entry.isDirectory()) {
-          pending.push(path);
-        } else {
-          const relativePath = posix.relative(sourceDirectory, path);
-          await writer.restore(
-            `findings/${slug}/${relativePath}`,
-            await readScanFile(
-              input.scanDir,
-              path,
-              "Scan merge writeup evidence",
-              signal,
-            ),
-          );
+      if (failure !== undefined) break;
+      const reportPath = writeup.reportPath;
+      const sourceDirectory = posix.dirname(reportPath);
+      const slug = `${input.scanId}-${posix.basename(sourceDirectory)}`;
+      const directoryKey = collisionKey(`findings/${slug}`);
+      const destination = `findings/${slug}/${slug}.md`;
+      const prior = destinations.get(directoryKey);
+      if (prior === reportPath) {
+        writeup.reportPath = destination;
+        continue;
+      }
+      if (prior !== undefined) {
+        await Promise.all(
+          [...running]
+            .filter(([key]) => key.startsWith(`${directoryKey}/`))
+            .map(([, operation]) => operation),
+        );
+      }
+      const reportKey = collisionKey(destination);
+      if (!(await ready(reportKey))) break;
+      // Validate and read the report before enumerating its directory. Its
+      // write can overlap independent evidence, but retains the first error
+      // position and participates in destination alias ordering.
+      await startReport(reportPath, destination, reportKey);
+      const pending = [sourceDirectory];
+      while (pending.length > 0) {
+        signal?.throwIfAborted();
+        const directory = pending.pop()!;
+        for (const entry of await readdir(join(input.scanDir, directory), {
+          withFileTypes: true,
+        })) {
+          const path = posix.join(directory, entry.name);
+          if (path === reportPath) continue;
+          if (entry.isDirectory()) {
+            pending.push(path);
+            continue;
+          }
+          const evidenceDestination = `findings/${slug}/${posix.relative(sourceDirectory, path)}`;
+          const key = collisionKey(evidenceDestination);
+          if (!(await ready(key))) break reports;
+          track(key, copy(path, evidenceDestination));
         }
       }
+      destinations.set(directoryKey, reportPath);
+      writeup.reportPath = destination;
     }
-    writeup.reportPath = destination;
-  };
-  const writeups = projected.draft.findings.flatMap((finding) => {
-    const writeup = finding["writeup"] as { reportPath: string } | undefined;
-    return writeup === undefined ? [] : [writeup];
-  });
-  for (let start = 0; start < writeups.length; start += 8) {
-    const destinations = new Map<string, Promise<void>>();
-    const results = await Promise.allSettled(
-      writeups.slice(start, start + 8).map(async (writeup) => {
-        // Serialize destination aliases, including on case-insensitive volumes.
-        const key = posix
-          .basename(posix.dirname(writeup.reportPath))
-          .normalize("NFC")
-          .toUpperCase();
-        const pending = (destinations.get(key) ?? Promise.resolve()).then(() =>
-          project(writeup),
-        );
-        destinations.set(key, pending);
-        return pending;
-      }),
-    );
-    // Drain the batch, then surface the first error in original report order.
-    for (const result of results)
-      if (result.status === "rejected") throw result.reason;
+  } catch (error) {
+    failed(sequence, error);
   }
+  // Admission follows report and evidence source order. Drain every admitted
+  // write before reporting the first error, including traversal/cancellation.
+  await Promise.all(running.values());
+  if (failure !== undefined) throw failure.error;
+  if (destinations.size > 0) signal?.throwIfAborted();
   return projected;
 }
 
