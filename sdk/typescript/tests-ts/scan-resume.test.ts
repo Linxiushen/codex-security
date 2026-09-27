@@ -83,7 +83,7 @@ async function interruptedScan(
       join(root, "manifest.json"),
       JSON.stringify(
         {
-          version: 1,
+          version: 2,
           tasks: [task],
           ...(settings.knowledgeBasePaths?.length
             ? {

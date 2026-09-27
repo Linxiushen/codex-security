@@ -856,7 +856,7 @@ async function ensureManifest(
   );
   const expected = `${JSON.stringify(
     {
-      version: 1,
+      version: 2,
       tasks,
       ...(options.scanPrompt === undefined
         ? {}

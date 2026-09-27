@@ -326,7 +326,7 @@ describe("multiscan", () => {
     await mkdir(paths.output);
     await writeFile(
       join(paths.output, "manifest.json"),
-      JSON.stringify({ version: 1, tasks }, null, 2) + "\n",
+      JSON.stringify({ version: 2, tasks }, null, 2) + "\n",
     );
     const tail = '{"id":"failed","status":';
     const original =
@@ -2044,6 +2044,39 @@ describe("multiscan", () => {
       "manifest does not match",
     );
     expect(calls).toBe(2);
+  });
+
+  test("rejects legacy campaigns when unrecorded inputs are omitted", async () => {
+    const paths = await fixture();
+    const source = await repository(paths.root, "legacy-inputs");
+    await writeFile(
+      paths.input,
+      `id,repository,revision\nrepo,${source.path},${source.revision}\n`,
+    );
+    const document = join(paths.root, "architecture.md");
+    await writeFile(document, "Original context.");
+    let calls = 0;
+    const security = client(async (_repository, scanOptions = {}) => {
+      calls++;
+      return completedScan(scanOptions.outputDir!);
+    });
+    const initial = options(paths, security, {
+      knowledgeBasePaths: [document],
+      config: { codexOverrides: { model: "synthetic-model" } },
+    });
+    await runMultiscan(initial);
+    expect(await runMultiscan(initial)).toMatchObject({ skipped: 1 });
+
+    const manifestPath = join(paths.output, "manifest.json");
+    const { tasks } = JSON.parse(await readFile(manifestPath, "utf8"));
+    await writeFile(
+      manifestPath,
+      JSON.stringify({ version: 1, tasks }, null, 2) + "\n",
+    );
+    await expect(runMultiscan(options(paths, security))).rejects.toThrow(
+      "manifest does not match",
+    );
+    expect(calls).toBe(1);
   });
 
   test.each([false, true])(

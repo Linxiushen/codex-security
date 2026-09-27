@@ -1042,8 +1042,10 @@ results directory. `fail_on_severity` returns exit `1` without retrying complete
 scans, including when resuming saved results. A changed project configuration
 requires a new campaign output directory. Campaign identity also includes
 extracted knowledge-base text, staged document filenames, and direct Codex
-overrides. If these inputs change, or an older manifest lacks their fingerprints,
-use a new output directory. Worker and retry counts can change when resuming.
+overrides. Changed inputs require a new output directory. Version 1 campaign
+manifests also require a new output directory because their original knowledge
+inputs and direct Codex overrides cannot be verified. Worker and retry counts
+can change when resuming.
 `--post-scan-prompt-file PATH` runs a follow-up in the same authenticated session,
 even after a failed or incomplete scan, but not after cancellation or a
 cost-limit stop.
