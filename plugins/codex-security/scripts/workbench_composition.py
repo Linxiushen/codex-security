@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sqlite3
@@ -132,3 +133,7 @@ def load_composition(connection: sqlite3.Connection, scan: sqlite3.Row) -> Compo
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (scan["id"],)
         ).fetchone(),
     )
+
+
+if __name__ == "__main__":
+    argparse.ArgumentParser(description=__doc__).parse_args()
