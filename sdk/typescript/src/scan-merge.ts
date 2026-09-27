@@ -17,6 +17,8 @@ import {
   validateFindingSemantics,
   type JsonObject,
   type SemanticScan,
+  type SemanticFinding,
+  type SemanticCoverage,
 } from "./scan-semantics.js";
 
 export type ScanAggregate = Omit<
@@ -31,7 +33,7 @@ export interface ScanMergeInput {
   sourceFindings: JsonObject[];
 }
 
-interface ScanMergeResult {
+export interface ScanMergeResult {
   aggregate: ScanAggregate;
   newFindings: number;
   /** Each novel issue belongs to the earliest input that discovered it. */
@@ -75,7 +77,7 @@ export function scanMergeInput(
     throw new Error("A scan checkpoint cannot be merged as a completed scan.");
   draft.findings.forEach((finding, index) => {
     finding["provenance"] = {
-      ...(finding["provenance"] as JsonObject),
+      ...finding.provenance,
       sourceFindingIds: [`${scanId}:${index}`],
     };
   });
@@ -141,7 +143,7 @@ export async function projectScanMergeWriteups(
   const reportSlugs = new Map<string, string>();
   const reservedSlugs = new Set(
     projected.draft.findings.flatMap((finding) => {
-      const writeup = finding["writeup"] as { reportPath: string } | undefined;
+      const writeup = finding.writeup;
       return typeof writeup?.reportPath === "string"
         ? [
             collisionKey(
@@ -156,7 +158,7 @@ export async function projectScanMergeWriteups(
   const destinations = new Map<string, string>();
   try {
     reports: for (const finding of projected.draft.findings) {
-      const writeup = finding["writeup"] as { reportPath: string } | undefined;
+      const writeup = finding.writeup;
       if (writeup === undefined) continue;
       signal?.throwIfAborted();
       if (failure !== undefined) break;
@@ -310,12 +312,11 @@ function compileMergeSchema(
   return validator;
 }
 
-function sourceIds(finding: JsonObject): string[] {
-  const provenance = finding["provenance"] as JsonObject;
+function sourceIds(finding: SemanticFinding): string[] {
+  const provenance = finding.provenance;
   if (Array.isArray(provenance["sourceFindingIds"]))
-    return provenance["sourceFindingIds"] as string[];
-  const originals = provenance["sourceFindings"] as
-    Array<{ id: string }> | undefined;
+    return provenance.sourceFindingIds;
+  const originals = provenance.sourceFindings;
   return originals?.map((source) => source.id) ?? [];
 }
 
@@ -331,7 +332,7 @@ function reconcileScanMerge(
     findings: prepareScanFindings(
       raw.findings.map((finding) => ({
         ...finding,
-        provenance: { ...(finding["provenance"] as JsonObject) },
+        provenance: { ...finding.provenance },
       })),
     ),
   };
@@ -358,9 +359,8 @@ function reconcileScanMerge(
   }
   const previousSources = new Set<string>();
   for (const [index, finding] of (previous?.findings ?? []).entries()) {
-    const originals = (finding["provenance"] as JsonObject)[
-      "sourceFindings"
-    ] as Array<{ id: string; finding: JsonObject }> | undefined;
+    const originals = finding.provenance["sourceFindings"] as
+      Array<{ id: string; finding: JsonObject }> | undefined;
     if (originals?.length) {
       for (const original of originals) {
         sources.set(original.id, original.finding);
@@ -385,8 +385,8 @@ function reconcileScanMerge(
   const retainSources = () => {
     const claimed = new Set<string>();
     for (const finding of aggregate.findings) {
-      const provenance = finding["provenance"] as JsonObject;
-      let refs = provenance["sourceFindingIds"] as string[] | undefined;
+      const provenance = finding.provenance;
+      let refs = provenance.sourceFindingIds;
       if (refs === undefined) {
         if (sourcesByIdentity === undefined) {
           sourcesByIdentity = new Map();
@@ -451,13 +451,13 @@ function reconcileScanMerge(
   identityOrder.forEach(({ index }, position) => {
     aggregate.findings[index] = identified[position]!;
   });
-  const bySource = new Map<string, JsonObject>();
-  const byIdentity = new Map<string, JsonObject>();
+  const bySource = new Map<string, SemanticFinding>();
+  const byIdentity = new Map<string, SemanticFinding>();
   for (const finding of aggregate.findings) {
     for (const id of sourceIds(finding)) bySource.set(id, finding);
     byIdentity.set(identityOf(finding), finding);
   }
-  const retained = new Map<JsonObject, JsonObject[]>();
+  const retained = new Map<SemanticFinding, SemanticFinding[]>();
   for (const finding of previous?.findings ?? []) {
     const refs = sourceIds(finding);
     const current = refs.length
@@ -482,7 +482,7 @@ function reconcileScanMerge(
   }
   retainSources();
   for (const finding of aggregate.findings) {
-    const severity = finding["severity"] as JsonObject;
+    const severity = finding.severity;
     const levels = new Set(
       [
         ...sourceIds(finding).map(
@@ -491,9 +491,7 @@ function reconcileScanMerge(
               "level"
             ],
         ),
-        ...(retained.get(finding) ?? []).map(
-          (prior) => (prior["severity"] as JsonObject)["level"],
-        ),
+        ...(retained.get(finding) ?? []).map((prior) => prior.severity.level),
       ].filter((level) => typeof level === "string"),
     );
     const level = severity["level"];
@@ -503,7 +501,7 @@ function reconcileScanMerge(
     )
       continue;
     if (
-      !["rationale", "changeConditions"].every(
+      !(["rationale", "changeConditions"] as const).every(
         (key) =>
           typeof severity[key] === "string" && severity[key].trim().length > 0,
       )
@@ -512,12 +510,14 @@ function reconcileScanMerge(
         "Scan merge changed or reconciled conflicting severities without severity.rationale and severity.changeConditions.",
       );
   }
-  for (const field of ["threatModel", "scope"] as const) {
-    if (aggregate[field] !== undefined) continue;
+  const retainedContext = <Field extends "threatModel" | "scope">(
+    field: Field,
+  ): ScanAggregate[Field] => {
+    if (aggregate[field] !== undefined) return aggregate[field];
     const contexts = [
       ...inputs.map((input) => input.draft[field]),
       previous?.[field],
-    ].filter((context): context is JsonObject => context !== undefined);
+    ].filter((context) => context !== undefined);
     const distinct = contexts.filter(
       (context, index) =>
         contexts.findIndex((other) => isDeepStrictEqual(context, other)) ===
@@ -527,8 +527,12 @@ function reconcileScanMerge(
       throw new Error(
         `Scan merge has ambiguous ${field}; provide the reconciled ${field} explicitly.`,
       );
-    if (distinct[0] !== undefined) aggregate[field] = distinct[0];
-  }
+    return distinct[0];
+  };
+  const threatModel = retainedContext("threatModel");
+  if (threatModel !== undefined) aggregate.threatModel = threatModel;
+  const scope = retainedContext("scope");
+  if (scope !== undefined) aggregate.scope = scope;
   const newFindings = aggregate.findings.filter(
     (finding) => !retained.has(finding),
   );
@@ -553,13 +557,13 @@ export function combineScanCoverage(
   inputs: readonly ScanMergeInput[],
   parentScanDir: string,
   unresolved: readonly string[] = [],
-  priorCoverage?: JsonObject,
-): JsonObject {
+  priorCoverage?: SemanticCoverage,
+): SemanticCoverage {
   const completed = [
     ...inputs.map((input) => input.draft.coverage),
     ...(priorCoverage ? [priorCoverage] : []),
   ];
-  const coverage: JsonObject = {
+  const coverage: SemanticCoverage = {
     completeness:
       completed.length === 0 ||
       unresolved.length > 0 ||
@@ -568,24 +572,23 @@ export function combineScanCoverage(
         : completed.some((source) => source["completeness"] === "unknown")
           ? "unknown"
           : "complete",
+    surfaces: [],
+    explicitExclusions: [],
+    deferred: [],
   };
-  for (const field of [
-    "surfaces",
-    "explicitExclusions",
-    "deferred",
-    "openQuestions",
-  ] as const) {
+  const projectField = <
+    Field extends
+      "surfaces" | "explicitExclusions" | "deferred" | "openQuestions",
+  >(
+    field: Field,
+  ): void => {
     coverage[field] = exactUnion([
-      ...structuredClone(
-        (priorCoverage?.[field] as unknown[] | undefined) ?? [],
-      ),
+      ...structuredClone(priorCoverage?.[field] ?? []),
       ...inputs.flatMap((input) => {
         const root = relative(parentScanDir, input.scanDir)
           .split(sep)
           .join("/");
-        return (
-          (input.draft.coverage[field] as unknown[] | undefined) ?? []
-        ).map((value) => {
+        return (input.draft.coverage[field] ?? []).map((value) => {
           if (!isObject(value)) return value;
           const entry = structuredClone(value);
           if (typeof entry["id"] === "string")
@@ -606,11 +609,13 @@ export function combineScanCoverage(
           return entry;
         });
       }),
-    ]);
-  }
-  (coverage["deferred"] as unknown[]).push(
-    ...unresolved.map((reason) => ({ reason })),
-  );
+    ]) as SemanticCoverage[Field];
+  };
+  projectField("surfaces");
+  projectField("explicitExclusions");
+  projectField("deferred");
+  projectField("openQuestions");
+  coverage.deferred.push(...unresolved.map((reason) => ({ reason })));
   return coverage;
 }
 

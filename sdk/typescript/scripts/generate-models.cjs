@@ -82,16 +82,61 @@ async function generate() {
   );
 }
 
-generate().then((models) => {
-  const output = join(packageRoot, "src", "models.ts");
-  if (process.argv.includes("--check")) {
-    if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
-      console.error(
-        "src/models.ts is out of date. Run `pnpm generate:models`.",
-      );
-      process.exitCode = 1;
+async function generateSemanticModels() {
+  const schema = JSON.parse(
+    readFileSync(join(schemas, "tools/scan-draft.schema.json"), "utf8"),
+  );
+  const common = JSON.parse(
+    readFileSync(
+      join(schemas, "definitions/artifact-common.schema.json"),
+      "utf8",
+    ),
+  );
+  // Resolve the plugin's URI references locally, using the same source schema as
+  // runtime draft validation. Common definitions contain no further references.
+  const input = JSON.parse(
+    JSON.stringify(schema).replaceAll(
+      "codex-security://schemas/definitions/artifact-common.schema.json#/$defs/",
+      "#/$defs/common/$defs/",
+    ),
+  );
+  input.$defs.common = common;
+  input.title = "SemanticScan";
+  const model = await compile(withoutAllOf(input), "SemanticScan", {
+    bannerComment: "",
+    format: false,
+    ignoreMinAndMaxItems: true,
+    unknownAny: true,
+  });
+  return format(
+    [
+      "/* Generated from the plugin semantic draft schema. Run `pnpm generate:models`. */",
+      model.trim(),
+      'export type SemanticFinding = SemanticScan["findings"][number];',
+      'export type SemanticCoverage = SemanticScan["coverage"];',
+      'export type SemanticScope = NonNullable<SemanticScan["scope"]>;',
+      'export type SemanticThreatModel = NonNullable<SemanticScan["threatModel"]>;',
+    ].join("\n\n"),
+    { parser: "typescript", printWidth: 80 },
+  );
+}
+
+Promise.all([generate(), generateSemanticModels()]).then((documents) => {
+  for (const [index, filename] of [
+    "models.ts",
+    "semantic-models.ts",
+  ].entries()) {
+    const models = documents[index];
+    const output = join(packageRoot, "src", filename);
+    if (process.argv.includes("--check")) {
+      if (readFileSync(output, "utf8").replaceAll("\r\n", "\n") !== models) {
+        console.error(
+          `src/${filename} is out of date. Run \`pnpm generate:models\`.`,
+        );
+        process.exitCode = 1;
+      }
+      continue;
     }
-    return;
+    writeFileSync(output, models);
   }
-  writeFileSync(output, models);
 });

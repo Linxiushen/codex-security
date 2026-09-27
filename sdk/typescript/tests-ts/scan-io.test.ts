@@ -1,3 +1,4 @@
+import { semanticFinding, semanticCoverage } from "./helpers/semantic-scan.js";
 import { tmpdir } from "node:os";
 import * as fs from "node:fs/promises";
 import { join } from "node:path";
@@ -256,12 +257,14 @@ async function reports(names: string[]): Promise<ScanMergeInput> {
       join(scanDir, folder, "evidence/data"),
       Buffer.from([index, 0, 255]),
     );
-    findings.push({ writeup: { reportPath: `${folder}/report.md` } });
+    findings.push(
+      semanticFinding({ writeup: { reportPath: `${folder}/report.md` } }),
+    );
   }
   return {
     scanId: "child",
     scanDir,
-    draft: { scanId: "parent", findings, coverage: {} },
+    draft: { scanId: "parent", findings, coverage: semanticCoverage() },
     sourceFindings: structuredClone(findings),
   };
 }
@@ -350,7 +353,10 @@ test.each([false, true])(
 
 test("a report-path setup error still drains an earlier writer", async () => {
   const input = await reports(["first", "second"]);
-  input.draft.findings[1]!["writeup"] = { reportPath: null };
+  // Deliberately malformed source checks that queued writes still drain.
+  (
+    input.draft.findings[1]!["writeup"] as unknown as { reportPath: null }
+  ).reportPath = null;
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   let finished = false;

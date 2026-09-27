@@ -1,15 +1,26 @@
 import { createHash } from "node:crypto";
+import type {
+  CoverageDocument,
+  CoverageMode,
+  InventoryStrategy,
+  ScanScope,
+  ScanTargetRecord,
+  TargetKind,
+} from "./models.js";
 export type JsonObject = Record<string, unknown>;
 
-export interface SemanticScan {
-  scanId: string;
-  complete?: boolean;
-  handoffClaimToken?: string;
-  scope?: JsonObject;
-  threatModel?: JsonObject;
-  findings: JsonObject[];
-  coverage: JsonObject;
-}
+import type {
+  SemanticScan,
+  SemanticFinding,
+  SemanticCoverage,
+  SemanticScope,
+} from "./semantic-models.js";
+export type {
+  SemanticScan,
+  SemanticFinding,
+  SemanticCoverage,
+  SemanticScope,
+} from "./semantic-models.js";
 
 /** Project canonical documents into the same semantic input used by normal drafts. */
 export function semanticScanDraft(
@@ -51,7 +62,7 @@ export function semanticScanDraft(
       return semantic;
     }),
     coverage: semanticCoverage,
-  };
+  } as SemanticScan;
 }
 
 function withoutPreviousFindings(finding: JsonObject): JsonObject {
@@ -186,15 +197,19 @@ export function exactUnion<Value>(...groups: Value[][]): Value[] {
   });
 }
 
-export function scanFindingIdentity(finding: JsonObject): string {
-  const identity = finding["identity"] as JsonObject | undefined;
+export function scanFindingIdentity(source: JsonObject): string {
+  const finding = source as Pick<
+    SemanticFinding,
+    "ruleId" | "identity" | "locations"
+  >;
+  const identity = finding.identity;
   if (identity)
     return JSON.stringify([
       finding["ruleId"],
       identity["anchor"],
       identity["instance"] ?? null,
     ]);
-  const location = (finding["locations"] as JsonObject[])[0]!;
+  const location = finding.locations[0]!;
   return JSON.stringify([
     finding["ruleId"],
     location["path"],
@@ -203,9 +218,9 @@ export function scanFindingIdentity(finding: JsonObject): string {
   ]);
 }
 
-export function validateFindingSemantics(findings: JsonObject[]): void {
+export function validateFindingSemantics(findings: SemanticFinding[]): void {
   for (const [findingIndex, finding] of findings.entries()) {
-    const severity = finding["severity"] as JsonObject;
+    const severity = finding.severity;
     if (
       severity["score"] !== undefined &&
       typeof severity["scoringSystem"] !== "string"
@@ -215,11 +230,11 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
       );
     }
 
-    const locations = finding["locations"] as JsonObject[];
+    const locations = finding.locations;
     for (const [locationIndex, location] of locations.entries()) {
       if (
         typeof location["endLine"] === "number" &&
-        location["endLine"] < (location["startLine"] as number)
+        location["endLine"] < location.startLine
       ) {
         throw new Error(
           `scan draft: findings[${findingIndex}].locations[${locationIndex}].endLine ` +
@@ -234,9 +249,9 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
       ["code_evidence", finding["code_evidence"]],
     ] as const) {
       for (const [evidenceIndex, evidence] of (
-        (evidenceCatalog as JsonObject[] | undefined) ?? []
+        evidenceCatalog ?? []
       ).entries()) {
-        const id = evidence["id"] as string;
+        const id = evidence.id;
         if (evidenceIds.has(id)) {
           throw new Error(
             `scan draft: findings[${findingIndex}].${evidenceName}[${evidenceIndex}].id ` +
@@ -297,15 +312,15 @@ export function validateFindingSemantics(findings: JsonObject[]): void {
   }
 }
 
-export function validateCoverageSemantics(coverage: JsonObject): void {
+export function validateCoverageSemantics(coverage: SemanticCoverage): void {
   if (coverage["completeness"] !== "complete") return;
-  if ((coverage["deferred"] as unknown[]).length > 0) {
+  if (coverage.deferred.length > 0) {
     throw new Error(
       "scan draft: complete coverage cannot contain deferred work.",
     );
   }
   if (
-    (coverage["surfaces"] as JsonObject[]).some(
+    coverage.surfaces.some(
       (surface) => surface["disposition"] === "needs_follow_up",
     )
   ) {
@@ -331,10 +346,36 @@ export interface SemanticScanContext {
   targetRevision?: string;
 }
 
+type PreparedFinding = SemanticFinding & {
+  identity: NonNullable<SemanticFinding["identity"]>;
+};
+type PreparedCoverage = Pick<
+  CoverageDocument,
+  | "mode"
+  | "completeness"
+  | "inventoryStrategy"
+  | "includePaths"
+  | "excludePaths"
+  | "surfaces"
+  | "explicitExclusions"
+  | "deferred"
+  | "openQuestions"
+> &
+  JsonObject;
+
+/** Canonical documents before host-owned IDs, envelope fields and seals are added. */
 export interface PreparedScanDraft {
-  manifest: JsonObject;
-  findings: JsonObject;
-  coverage: JsonObject;
+  manifest: {
+    scan: {
+      complete?: boolean;
+      target: ScanTargetRecord;
+      scope: ScanScope;
+      threatModel?: SemanticScan["threatModel"];
+      hardening?: { portfolioPath: "hardening/hardening.md" };
+    };
+  };
+  findings: { findings: PreparedFinding[] };
+  coverage: PreparedCoverage;
 }
 
 /** Build ordinary canonical documents from host-bound target metadata and validated semantics. */
@@ -378,7 +419,7 @@ function buildTarget(
   context: SemanticScanContext,
   contract: JsonObject,
   trustedTarget: JsonObject,
-): JsonObject {
+): ScanTargetRecord {
   const allowedKinds = trustedTarget["allowedKinds"];
   if (
     !Array.isArray(allowedKinds) ||
@@ -400,8 +441,8 @@ function buildTarget(
     );
   }
 
-  const target: JsonObject = {
-    kind: allowedKinds[0],
+  const target: ScanTargetRecord = {
+    kind: allowedKinds[0] as TargetKind,
     targetId: trustedTarget["targetId"],
     displayName: trustedTarget["displayName"],
   };
@@ -437,9 +478,9 @@ function buildTarget(
         .update("codex-security-diff/v1\0")
         .update(diffTarget["kind"])
         .update("\0")
-        .update(target["baseRevision"] as string)
+        .update(target.baseRevision!)
         .update("\0")
-        .update(target["headRevision"] as string)
+        .update(target.headRevision!)
         .digest("hex");
       target["snapshotDigest"] = `codex-security-snapshot/v1:sha256:${digest}`;
     } else {
@@ -469,8 +510,8 @@ function buildTarget(
 function buildScope(
   context: SemanticScanContext,
   trustedScope: JsonObject,
-  semanticScope?: JsonObject,
-): JsonObject {
+  semanticScope?: SemanticScope,
+): ScanScope {
   const includePaths = trustedScope["requiredIncludePaths"];
   const excludePaths = trustedScope["requiredExcludePaths"];
   const resolvedIncludePaths =
@@ -500,19 +541,17 @@ function buildScope(
 }
 
 export function prepareScanFindings(
-  findings: JsonObject[],
+  findings: SemanticFinding[],
   mode?: string,
-): JsonObject[] {
+): PreparedFinding[] {
   const generatedIdentities = findings.map((finding, index) => {
     if (finding["identity"] !== undefined) return undefined;
-    const candidateId = (finding["extensions"] as JsonObject | undefined)?.[
-      "candidateId"
-    ];
+    const candidateId = finding.extensions?.["candidateId"];
     const identitySource =
       typeof candidateId === "string" && candidateId.trim()
         ? candidateId
-        : (finding["title"] as string);
-    const extensions = finding["extensions"] as JsonObject | undefined;
+        : finding.title;
+    const extensions = finding.extensions;
     const siblingSource = [
       extensions?.["reportId"],
       extensions?.["ledgerRowId"],
@@ -523,15 +562,14 @@ export function prepareScanFindings(
     return {
       anchor: semanticIdentifier(identitySource, `finding-${index + 1}`),
       stableInstanceSource: siblingSource,
-      siblingSource: siblingSource ?? (finding["title"] as string),
+      siblingSource: siblingSource ?? finding.title,
     };
   });
   const anchorCounts = new Map<string, number>();
   for (const [index, finding] of findings.entries()) {
     const generatedIdentity = generatedIdentities[index];
-    const authoredIdentity = finding["identity"] as JsonObject | undefined;
-    const anchor =
-      generatedIdentity?.anchor ?? (authoredIdentity?.["anchor"] as string);
+    const authoredIdentity = finding.identity;
+    const anchor = generatedIdentity?.anchor ?? authoredIdentity!.anchor;
     const ruleScopedAnchor = `${finding["ruleId"]}\0${anchor}`;
     anchorCounts.set(
       ruleScopedAnchor,
@@ -539,10 +577,13 @@ export function prepareScanFindings(
     );
   }
 
-  const identified: JsonObject[] = findings.map((finding, index) => {
+  const identified = findings.map((finding, index) => {
     const generatedIdentity = generatedIdentities[index];
-    if (generatedIdentity === undefined) return { ...finding };
-    const identity: JsonObject = { anchor: generatedIdentity.anchor };
+    if (generatedIdentity === undefined)
+      return { ...finding, identity: finding.identity! };
+    const identity: NonNullable<SemanticFinding["identity"]> = {
+      anchor: generatedIdentity.anchor,
+    };
     const ruleScopedAnchor = `${finding["ruleId"]}\0${generatedIdentity.anchor}`;
     if (
       generatedIdentity.stableInstanceSource !== undefined ||
@@ -571,10 +612,10 @@ export function prepareScanFindings(
       used.add(key);
       return finding;
     }
-    const identity = finding["identity"] as JsonObject;
+    const identity = finding.identity;
     const baseInstance = identity["instance"] ?? "saved";
     let suffix = 2;
-    const distinct: JsonObject & { identity: JsonObject } = {
+    const distinct = {
       ...finding,
       identity: { ...identity },
     };
@@ -585,7 +626,7 @@ export function prepareScanFindings(
       reserved.has(scanFindingIdentity(distinct)) ||
       used.has(scanFindingIdentity(distinct))
     );
-    const provenance = finding["provenance"] as JsonObject;
+    const provenance = finding.provenance;
     distinct["provenance"] = {
       ...provenance,
       preservedIdentity:
@@ -599,11 +640,11 @@ export function prepareScanFindings(
 function buildCoverage(
   context: SemanticScanContext,
   contract: JsonObject,
-  semanticCoverage: JsonObject,
-  scope: JsonObject,
-  target: JsonObject,
-): JsonObject {
-  const surfaces = semanticCoverage["surfaces"] as JsonObject[];
+  semanticCoverage: SemanticCoverage,
+  scope: ScanScope,
+  target: ScanTargetRecord,
+): PreparedCoverage {
+  const surfaces = semanticCoverage.surfaces;
   const reservedSurfaceIds = new Set(
     surfaces.flatMap((surface) =>
       typeof surface["id"] === "string" ? [surface["id"]] : [],
@@ -613,8 +654,8 @@ function buildCoverage(
   const normalizedSurfaces = surfaces.map((surface, index) => {
     const explicitId = typeof surface["id"] === "string";
     const baseId = explicitId
-      ? (surface["id"] as string)
-      : `surface_${semanticIdentifier(surface["label"] as string, String(index + 1))}`;
+      ? surface.id!
+      : `surface_${semanticIdentifier(surface.label, String(index + 1))}`;
     let id = baseId;
     if (surfaceIds.has(id) || (!explicitId && reservedSurfaceIds.has(id))) {
       let suffix = 2;
@@ -630,7 +671,7 @@ function buildCoverage(
       receiptRefs: surface["receiptRefs"] ?? [],
     };
   });
-  const deferred = semanticCoverage["deferred"] as JsonObject[];
+  const deferred = semanticCoverage.deferred;
   // Reserve later owned identities before deriving any earlier missing ones.
   const deferredIds = new Set(
     deferred.flatMap((item) =>
@@ -643,7 +684,7 @@ function buildCoverage(
     ),
   );
   const normalizedDeferred = deferred.map((item) => {
-    if (typeof item["id"] === "string") return item;
+    if (typeof item["id"] === "string") return { ...item, id: item.id };
 
     const candidateId = item["candidateId"];
     const baseId =
@@ -671,39 +712,36 @@ function buildCoverage(
     deferredIds.add(id);
     return { ...item, id };
   });
-  const openQuestions = semanticCoverage["openQuestions"] as
-    Array<string | JsonObject> | undefined;
+  const openQuestions = semanticCoverage.openQuestions;
 
-  return {
+  const result: PreparedCoverage = {
     ...semanticCoverage,
+    openQuestions: undefined,
     mode: coverageMode(context, contract),
     inventoryStrategy: inventoryStrategy(context, scope, target),
-    includePaths: scope["includePaths"],
-    excludePaths: scope["excludePaths"],
+    includePaths: scope.includePaths,
+    excludePaths: scope.excludePaths,
     surfaces: normalizedSurfaces,
     deferred: normalizedDeferred,
-    ...(openQuestions === undefined
-      ? {}
-      : {
-          openQuestions: openQuestions.map((question) =>
-            typeof question === "string"
-              ? { question: question.trim() }
-              : question,
-          ),
-        }),
   };
+  if (openQuestions === undefined) delete result.openQuestions;
+  else
+    result.openQuestions = openQuestions.map((question) =>
+      typeof question === "string" ? { question: question.trim() } : question,
+    );
+  return result;
 }
 
 function coverageMode(
   context: SemanticScanContext,
   contract: JsonObject,
-): string {
+): CoverageMode {
   if (context.mode === "diff") {
     const diff = requireObject(
       contract["diffTarget"],
       "scan draft: authoritative diff target",
     );
-    const modes: Record<string, string> = {
+    const modes: Record<string, CoverageMode> = {
       commit: "commit",
       range: "branch_diff",
       working_tree: "working_tree",
@@ -731,11 +769,11 @@ function coverageMode(
 
 function inventoryStrategy(
   context: SemanticScanContext,
-  scope: JsonObject,
-  target: JsonObject,
-): string {
+  scope: ScanScope,
+  target: ScanTargetRecord,
+): InventoryStrategy {
   if (context.mode === "diff") return "diff";
-  const includePaths = scope["includePaths"] as string[];
+  const includePaths = scope.includePaths;
   if (includePaths.length !== 1 || includePaths[0] !== ".")
     return "scoped_path";
   if (context.mode === "deep") return "repository";

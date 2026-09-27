@@ -1,3 +1,4 @@
+import { semanticCoverage } from "./helpers/semantic-scan.js";
 import { randomUUID } from "node:crypto";
 import {
   cp,
@@ -389,7 +390,11 @@ describe("ordinary scan composition", () => {
         startedAt: h.input.startedAt,
         passes: [],
         mergedScanIds: [],
-        aggregate: { scanId: h.input.scanId, findings: [], coverage: {} },
+        aggregate: {
+          scanId: h.input.scanId,
+          findings: [],
+          coverage: semanticCoverage(),
+        },
         noNewStreak: 0,
         consecutiveErrors: 0,
         terminalReason,
@@ -647,13 +652,13 @@ describe("ordinary scan composition", () => {
 
   test("continues saved legacy counters and coverage using only new ordinary scans", async () => {
     const h = await harness({ maxDiscoveryRuns: 3, stopAfterNoNew: 4 });
-    const coverage = {
+    const coverage = semanticCoverage({
       completeness: "partial",
       surfaces: [],
       deferred: [
         { id: "legacy-unresolved", reason: "Saved unresolved validation." },
       ],
-    };
+    });
     await h.seed({
       version: 2,
       startedAt: h.input.startedAt,
@@ -693,7 +698,7 @@ describe("ordinary scan composition", () => {
 
   test("recovers legacy paid usage once and requires it before spending under a saved limit", async () => {
     const h = await harness({ maxDiscoveryRuns: 1 });
-    const coverage = { completeness: "partial", surfaces: [] };
+    const coverage = semanticCoverage({ completeness: "partial" });
     const state: DeepScanCheckpoint = {
       version: 2,
       startedAt: h.input.startedAt,
@@ -1570,7 +1575,7 @@ describe("ordinary scan composition", () => {
         targetPath: h.input.repository,
         progress: { status: "running" },
       });
-      const coverage = { completeness: "partial", surfaces: [] };
+      const coverage = semanticCoverage({ completeness: "partial" });
       const checkpoint: DeepScanCheckpoint = {
         version: 2,
         startedAt,

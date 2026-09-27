@@ -1,11 +1,11 @@
 import type { ScanAggregate, ScanMergeInput } from "../../src/scan-merge.js";
-import type { JsonObject } from "../../src/scan-semantics.js";
+import type { SemanticFinding } from "../../src/semantic-models.js";
 
 export const parentId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
 export interface ExpectedGroup {
   refs: string[];
-  severity: string;
+  severity: SemanticFinding["severity"]["level"];
   facts: Record<string, string[]>;
 }
 
@@ -21,8 +21,8 @@ export interface MergeFixture {
 function observation(
   anchor: string,
   repair: string,
-  level = "medium",
-): JsonObject {
+  level: SemanticFinding["severity"]["level"] = "medium",
+): SemanticFinding {
   return {
     ruleId: "security-misconfiguration.synthetic-record",
     identity: { anchor },
@@ -39,7 +39,7 @@ function observation(
   };
 }
 
-function input(scanId: string, findings: JsonObject[]): ScanMergeInput {
+function input(scanId: string, findings: SemanticFinding[]): ScanMergeInput {
   return {
     scanId,
     scanDir: scanId,
@@ -56,6 +56,7 @@ function input(scanId: string, findings: JsonObject[]): ScanMergeInput {
       coverage: {
         completeness: "partial",
         surfaces: [],
+        explicitExclusions: [],
         deferred: [{ reason: "Synthetic outstanding work." }],
       },
     },
@@ -65,7 +66,7 @@ function input(scanId: string, findings: JsonObject[]): ScanMergeInput {
 function group(
   refs: string[],
   repairs: string[],
-  severity = "medium",
+  severity: SemanticFinding["severity"]["level"] = "medium",
 ): ExpectedGroup {
   return {
     refs,
@@ -84,11 +85,9 @@ function fixture(
   expected: ExpectedGroup[],
   previous: ScanAggregate | null = null,
 ): MergeFixture {
-  const byRef = new Map<string, JsonObject>();
+  const byRef = new Map<string, SemanticFinding>();
   for (const finding of previous?.findings ?? []) {
-    for (const ref of (finding["provenance"] as JsonObject)[
-      "sourceFindingIds"
-    ] as string[])
+    for (const ref of finding.provenance.sourceFindingIds ?? [])
       byRef.set(ref, finding);
   }
   for (const child of inputs)

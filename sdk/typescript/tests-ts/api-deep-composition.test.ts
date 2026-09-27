@@ -1,3 +1,4 @@
+import type { SemanticScan, SemanticFinding } from "../src/semantic-models.js";
 import { randomUUID } from "node:crypto";
 import * as childProcess from "node:child_process";
 import { execFileSync } from "node:child_process";
@@ -977,12 +978,13 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                           progress.at(-1)!.filesCompleted,
                         ).toBeLessThanOrEqual(3);
                       }
-                      const draft = {
+                      const draft: SemanticScan = {
                         scanId: id,
-                        findings: childFindings,
+                        findings: childFindings as SemanticFinding[],
                         coverage: {
                           completeness: "complete",
                           surfaces: [],
+                          explicitExclusions: [],
                           deferred: [],
                         },
                       };

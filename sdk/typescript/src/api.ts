@@ -17,13 +17,17 @@ import {
   ScanCostTrackingError,
   TerminalDeepScanError,
   terminalDeepScanError,
-  type DeepScanCheckpoint,
 } from "./deep-scan.js";
 import {
   acquireScanExecution,
   ScanTransportClosedError,
   ScanPermissionError,
 } from "./scan-execution.js";
+import { compositionCheckpointFromWorkbench } from "./deep-scan-checkpoint.js";
+import {
+  savedScanFromWorkbench,
+  savedScansFromWorkbench,
+} from "./workbench-types.js";
 import { prepareSemanticScanDraft } from "./scan-semantics.js";
 import { homedir, tmpdir } from "node:os";
 import {
@@ -1911,9 +1915,8 @@ export class CodexSecurity {
           "--scan-id",
           scanId,
         ]);
-        const savedScan = saved["scan"] as JsonObject;
-        const checkpoint = saved["compositionCheckpoint"] as
-          Omit<DeepScanCheckpoint, "aggregate"> | null | undefined;
+        const savedScan = savedScanFromWorkbench(saved);
+        const checkpoint = compositionCheckpointFromWorkbench(saved);
         resumeThreadId = savedScan["continuationThreadId"];
         // Legacy cost already includes this origin session; do not restart its tracker.
         sealedThreadId =
@@ -1938,19 +1941,15 @@ export class CodexSecurity {
             "--scan-root",
             join(scanDir, "artifacts/deep-scan/passes"),
           ]);
-          for (const child of children["scans"] as JsonObject[]) {
-            if (child["parentScanId"] === scanId)
-              passCosts.set(
-                child["scanId"] as string,
-                (child["cost"] as unknown as ScanCost | undefined) ?? null,
-              );
+          for (const child of savedScansFromWorkbench(children)) {
+            if (child.parentScanId === scanId)
+              passCosts.set(child.scanId, child.cost ?? null);
           }
         }
         if (mode === "deep" && checkpoint == null) {
           completionCost = await historicalCost(sealedThreadId!);
         }
-        completionCost ??=
-          (savedScan["cost"] as unknown as ScanCost | undefined) ?? null;
+        completionCost ??= savedScan.cost ?? null;
         if (
           typeof resumeThreadId !== "string" &&
           (emptyComposition || checkpoint?.legacy?.cost)
@@ -2037,8 +2036,7 @@ export class CodexSecurity {
             "--scan-id",
             scanId,
           ]);
-          const checkpoint = saved["compositionCheckpoint"] as
-            DeepScanCheckpoint | null | undefined;
+          const checkpoint = compositionCheckpointFromWorkbench(saved);
           if (
             checkpoint?.legacy &&
             !checkpoint.legacy.cost &&

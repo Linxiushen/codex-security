@@ -64,7 +64,7 @@ test("merge quality requires complete repair, test and control identifiers", () 
     ["preventiveControls", ["Maintain other-repair-1-control."]],
   ] as const) {
     const bad = structuredClone(fixture.reference);
-    bad.findings[1]![field] = wrong;
+    Object.assign(bad.findings[1]!, { [field]: wrong });
     expect(gradeMerge(bad, fixture.expected)).toEqual([
       `Missing canonical ${field} fact ${fixture.expected[1]!.facts[field]![0]}: ["wide:1"].`,
     ]);

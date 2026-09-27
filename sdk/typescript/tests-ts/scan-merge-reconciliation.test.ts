@@ -1,3 +1,4 @@
+import type { SemanticFinding } from "../src/semantic-models.js";
 import { tmpdir } from "node:os";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -97,7 +98,7 @@ test("concurrent schema roots retain independent validation and errors", async (
   }
 });
 
-function finding(anchor = "record"): JsonObject {
+function finding(anchor = "record"): SemanticFinding {
   return {
     ruleId: "security-misconfiguration.synthetic-record",
     identity: { anchor },
@@ -146,7 +147,7 @@ function provenance(entry: JsonObject): JsonObject {
   return entry["provenance"] as JsonObject;
 }
 
-function submission(findings: JsonObject[]): ScanAggregate {
+function submission(findings: SemanticFinding[]): ScanAggregate {
   return { scanId: parent, findings };
 }
 
@@ -158,7 +159,7 @@ test("returned aggregates detach inherited history, candidates, originals and co
     [source],
     null,
   ).aggregate;
-  previous.threatModel = { notes: ["saved context"] };
+  previous.threatModel = { summary: "Saved context", notes: ["saved context"] };
   const old = provenance(previous.findings[0]!);
   old["previousFindings"] = [
     { summary: "earlier synthesis", extensions: { detail: ["history"] } },

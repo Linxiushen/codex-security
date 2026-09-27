@@ -1,3 +1,7 @@
+import type {
+  SemanticFinding,
+  SemanticCoverage,
+} from "../src/semantic-models.js";
 import {
   mkdtemp,
   mkdir,
@@ -46,7 +50,7 @@ beforeAll(async () => {
   merge = await createScanMergeValidator(pluginRoot);
 });
 
-function finding(id = "shared", extra: JsonObject = {}): JsonObject {
+function finding(id = "shared", extra: JsonObject = {}): SemanticFinding {
   return {
     ruleId: "cross-site-scripting.request-output",
     identity: { anchor: id },
@@ -67,7 +71,7 @@ function finding(id = "shared", extra: JsonObject = {}): JsonObject {
 
 function child(
   scanId: string,
-  findings: JsonObject[] = [finding()],
+  findings: SemanticFinding[] = [finding()],
   coverage: JsonObject = {},
   includePaths: readonly string[] = ["src"],
 ) {
@@ -101,7 +105,7 @@ function child(
 }
 
 function submission(
-  findings: JsonObject[],
+  findings: SemanticFinding[],
   extra: JsonObject = {},
 ): ScanAggregate {
   return { scanId: parent, findings, ...extra };
@@ -561,13 +565,14 @@ describe("local scan merging", () => {
   });
 
   test("combines independent coverage IDs and receipt paths without mutating inputs", () => {
-    const coverage = {
+    const coverage: SemanticCoverage = {
+      explicitExclusions: [],
       completeness: "partial",
       surfaces: [
         {
           id: "api",
           label: "API",
-          disposition: "reviewed",
+          disposition: "no_issue_found",
           receiptRefs: ["artifacts/review.json"],
         },
       ],
@@ -590,12 +595,12 @@ describe("local scan merging", () => {
     expect(combined["completeness"]).toBe("partial");
     expect(combined["surfaces"]).toEqual([
       {
-        ...coverage.surfaces[0],
+        ...coverage.surfaces[0]!,
         id: "first/api",
         receiptRefs: ["artifacts/scans/first/artifacts/review.json"],
       },
       {
-        ...coverage.surfaces[0],
+        ...coverage.surfaces[0]!,
         id: "second/api",
         receiptRefs: ["artifacts/scans/second/artifacts/review.json"],
       },
@@ -621,17 +626,19 @@ describe("local scan merging", () => {
   });
 
   test("retains saved parent coverage without rebasing its identities or receipts", () => {
-    const prior = {
+    const prior: SemanticCoverage = {
       completeness: "partial",
       surfaces: [
         {
           id: "prior/surface",
           label: "Saved surface",
-          disposition: "reviewed",
+          disposition: "no_issue_found",
           receiptRefs: ["artifacts/deep-scan/prior/review.json"],
         },
       ],
-      explicitExclusions: ["Generated dependencies."],
+      explicitExclusions: [
+        { pattern: "vendor/**", reason: "Generated dependencies." },
+      ],
       deferred: [
         {
           candidateId: "prior:candidate",
@@ -649,11 +656,13 @@ describe("local scan merging", () => {
         {
           id: "new-surface",
           label: "Fresh surface",
-          disposition: "reviewed",
+          disposition: "no_issue_found",
           receiptRefs: ["artifacts/fresh.json"],
         },
       ],
-      explicitExclusions: ["Generated dependencies."],
+      explicitExclusions: [
+        { pattern: "vendor/**", reason: "Generated dependencies." },
+      ],
     });
     const coverage = combineScanCoverage([fresh], root, [], prior);
     expect(coverage["completeness"]).toBe("partial");
@@ -662,7 +671,7 @@ describe("local scan merging", () => {
       {
         id: "fresh/new-surface",
         label: "Fresh surface",
-        disposition: "reviewed",
+        disposition: "no_issue_found",
         receiptRefs: ["artifacts/scans/fresh/artifacts/fresh.json"],
       },
     ]);
@@ -672,14 +681,20 @@ describe("local scan merging", () => {
     (coverage["surfaces"] as JsonObject[])[0]!["id"] = "changed";
     expect(prior).toEqual(original);
     expect(
-      combineScanCoverage([], root, [], { completeness: "complete" })[
-        "completeness"
-      ],
+      combineScanCoverage([], root, [], {
+        completeness: "complete",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      })["completeness"],
     ).toBe("complete");
     expect(
-      combineScanCoverage([fresh], root, [], { completeness: "unknown" })[
-        "completeness"
-      ],
+      combineScanCoverage([fresh], root, [], {
+        completeness: "unknown",
+        surfaces: [],
+        explicitExclusions: [],
+        deferred: [],
+      })["completeness"],
     ).toBe("unknown");
   });
 

@@ -1,3 +1,4 @@
+import { semanticCoverage } from "./helpers/semantic-scan.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
@@ -1055,12 +1056,12 @@ test.each([
         },
       }) + "\n",
     );
-    const coverage = {
+    const coverage = semanticCoverage({
       completeness: "partial",
       surfaces: [],
       explicitExclusions: [],
       deferred: [{ reason: "Retained legacy discovery coverage." }],
-    };
+    });
     const checkpoint: DeepScanCheckpoint = {
       version: 2,
       startedAt: "2000-01-01T00:00:00Z",

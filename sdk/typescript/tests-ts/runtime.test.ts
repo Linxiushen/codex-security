@@ -1,3 +1,4 @@
+import { semanticFinding } from "./helpers/semantic-scan.js";
 import { execFile, spawnSync } from "node:child_process";
 import * as childProcess from "node:child_process";
 import { EventEmitter, once } from "node:events";
@@ -303,8 +304,14 @@ describe("plugin runtime preparation", () => {
 
   test("derives distinct finding identities from canonical candidate IDs", async () => {
     const findings = prepareScanFindings([
-      { title: "Same finding", extensions: { candidateId: "candidate-a" } },
-      { title: "Same finding", extensions: { candidateId: "candidate-b" } },
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-a" },
+      }),
+      semanticFinding({
+        title: "Same finding",
+        extensions: { candidateId: "candidate-b" },
+      }),
     ]);
 
     expect(

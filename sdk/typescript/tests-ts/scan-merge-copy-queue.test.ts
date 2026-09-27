@@ -1,3 +1,4 @@
+import { semanticFinding, semanticCoverage } from "./helpers/semantic-scan.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,9 +24,11 @@ async function fixture(names: string[], evidence: string[] = []) {
   );
   directories.push(scanDir);
   const files = new Map<string, Buffer>();
-  const findings = names.map((name) => ({
-    writeup: { reportPath: `findings/${name}/report.md` },
-  }));
+  const findings = names.map((name) =>
+    semanticFinding({
+      writeup: { reportPath: `findings/${name}/report.md` },
+    }),
+  );
   for (const name of names) {
     for (const file of ["report.md", ...evidence]) {
       const path = `findings/${name}/${file}`;
@@ -44,7 +47,7 @@ async function fixture(names: string[], evidence: string[] = []) {
   const input: ScanMergeInput = {
     scanId: "child",
     scanDir,
-    draft: { scanId: "parent", findings, coverage: {} },
+    draft: { scanId: "parent", findings, coverage: semanticCoverage() },
     sourceFindings: structuredClone(findings),
   };
   return { input, files };

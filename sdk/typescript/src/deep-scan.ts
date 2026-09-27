@@ -1,9 +1,8 @@
-import { lstat } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type { CodexSecurity, ScanOptions } from "./api.js";
 import type { JsonObject } from "./config.js";
-import { loadContract, readScanFile } from "./contract.js";
+import { loadContract } from "./contract.js";
 import type { ScanCost } from "./cost.js";
 import {
   ScanCostLimitExceededError,
@@ -26,7 +25,22 @@ import {
   ScanTransportClosedError,
 } from "./scan-execution.js";
 
-export const DEEP_SCAN_CHECKPOINT = "artifacts/deep-scan/checkpoint.json";
+import {
+  DEEP_SCAN_CHECKPOINT,
+  loadDeepScanCheckpoint,
+  newDeepScanCheckpoint,
+  serializeDeepScanCheckpoint,
+  type DeepScanCheckpoint,
+} from "./deep-scan-checkpoint.js";
+import {
+  savedScanFromWorkbench,
+  savedScansFromWorkbench,
+  type SavedScanRecord,
+} from "./workbench-types.js";
+export {
+  DEEP_SCAN_CHECKPOINT,
+  type DeepScanCheckpoint,
+} from "./deep-scan-checkpoint.js";
 
 /** Required usage tracking must stop the entire composition before another pass. */
 export class ScanCostTrackingError extends ScanInterruptedError {}
@@ -44,41 +58,6 @@ export class TerminalDeepScanError extends ScanInterruptedError {
   ) {
     super(message, scanDir);
   }
-}
-
-export interface DeepScanCheckpoint {
-  version: 2;
-  startedAt: string;
-  passes: Array<{
-    directory: string;
-    scanId?: string;
-    failed?: true;
-    // Saved with the failure streak so recovery accounts for each success once.
-    completed?: true;
-  }>;
-  mergedScanIds: string[];
-  aggregate: SemanticScan | null;
-  noNewStreak: number;
-  consecutiveErrors: number;
-  mergeFailures?: number;
-  legacy?: {
-    discoveryRuns: number;
-    coverage: JsonObject;
-    cost?: ScanCost;
-    originThreadId?: string;
-  };
-  terminalReason?: "saturated" | "capped" | "failed" | "canceled";
-}
-
-interface SavedPass {
-  completedAt?: string | null;
-  scanId: string;
-  scanDir: string;
-  parentScanId: string;
-  targetPath: string;
-  continuationThreadId?: string | null;
-  progress: { status: string };
-  cost?: ScanCost;
 }
 
 export interface DeepScanComposition {
@@ -101,35 +80,6 @@ export interface DeepScanComposition {
   historicalCost?(threadId: string): Promise<ScanCost | null>;
 }
 
-async function readCheckpoint(
-  scanDir: string,
-): Promise<DeepScanCheckpoint | undefined> {
-  try {
-    return JSON.parse(
-      (
-        await readScanFile(
-          scanDir,
-          DEEP_SCAN_CHECKPOINT,
-          "Deep Scan checkpoint",
-        )
-      ).toString("utf8"),
-    );
-  } catch (error) {
-    // No parent checkpoint exists on a new normal scan registration.
-    if (
-      await lstat(join(scanDir, DEEP_SCAN_CHECKPOINT)).then(
-        () => true,
-        (cause: NodeJS.ErrnoException) => {
-          if (cause.code === "ENOENT") return false;
-          throw cause;
-        },
-      )
-    )
-      throw error;
-    return undefined;
-  }
-}
-
 function passDirectory(index: number): string {
   return `artifacts/deep-scan/passes/pass-${index + 1}`;
 }
@@ -144,7 +94,7 @@ function validatePassDirectories(state: DeepScanCheckpoint): void {
 function savedPassIndex(
   input: Pick<DeepScanComposition, "scanId" | "scanDir" | "repository">,
   state: DeepScanCheckpoint,
-  record: SavedPass,
+  record: SavedScanRecord,
 ): number {
   const index = state.passes.findIndex(
     (pass) =>
@@ -170,7 +120,7 @@ export async function terminalDeepScanError(
   >,
   checkpoint?: DeepScanCheckpoint,
 ): Promise<TerminalDeepScanError | null> {
-  const state = checkpoint ?? (await readCheckpoint(input.scanDir));
+  const state = checkpoint ?? (await loadDeepScanCheckpoint(input.scanDir));
   if (
     state?.version !== 2 ||
     (state.terminalReason !== "failed" && state.terminalReason !== "canceled")
@@ -184,9 +134,7 @@ export async function terminalDeepScanError(
       "--scan-id",
       input.scanId,
     ]);
-    savedTotal =
-      ((saved["scan"] as JsonObject)["cost"] as unknown as
-        ScanCost | undefined) ?? null;
+    savedTotal = savedScanFromWorkbench(saved).cost ?? null;
     validatePassDirectories(state);
     const listed = await input.workbench([
       "list-scans",
@@ -198,7 +146,7 @@ export async function terminalDeepScanError(
       state.passes.map((pass) =>
         pass.scanId === undefined ? undefined : null,
       );
-    for (const record of listed["scans"] as unknown as SavedPass[]) {
+    for (const record of savedScansFromWorkbench(listed)) {
       const index = savedPassIndex(input, state, record);
       // Missing optional thread/cost persistence does not establish zero usage.
       if (index >= 0) costs[index] = record.cost ?? null;
@@ -222,7 +170,7 @@ export async function terminalDeepScanError(
     {
       constituents,
       savedTotal,
-      legacyThreadId: state.legacy?.originThreadId,
+      legacyThreadId: state.legacy?.originThreadId ?? undefined,
     },
   );
 }
@@ -232,17 +180,9 @@ export async function runDeepScans(
   input: DeepScanComposition,
 ): Promise<DeepScanCheckpoint> {
   const { scanId, scanDir, settings, signal, workbench } = input;
-  const state: DeepScanCheckpoint = (await readCheckpoint(scanDir)) ?? {
-    version: 2,
-    startedAt: input.startedAt,
-    passes: [],
-    mergedScanIds: [],
-    aggregate: null,
-    noNewStreak: 0,
-    consecutiveErrors: 0,
-  };
-  if (state.version !== 2)
-    throw new Error("Unsupported saved Deep Scan checkpoint.");
+  const state =
+    (await loadDeepScanCheckpoint(scanDir)) ??
+    newDeepScanCheckpoint(input.startedAt);
   const terminal = await terminalDeepScanError(input, state);
   if (terminal !== null) throw terminal;
   validatePassDirectories(state);
@@ -250,7 +190,7 @@ export async function runDeepScans(
   let savedSnapshot: string | undefined;
   let queuedSave: { snapshot: string; pending: Promise<void> } | undefined;
   const save = async (): Promise<void> => {
-    const snapshot = JSON.stringify(state);
+    const snapshot = serializeDeepScanCheckpoint(state);
     // A newer complete snapshot includes the changes of every queued caller.
     // All callers share its durability barrier; an in-flight write is unchanged.
     if (queuedSave) {
@@ -298,7 +238,7 @@ export async function runDeepScans(
   if (state.legacy?.cost) input.onCost("legacy", state.legacy.cost);
   const validateMerge = await createScanMergeValidator(input.pluginRoot);
   const accepted = new Map<string, ScanMergeInput>();
-  const saved = new Map<string, SavedPass>();
+  const saved = new Map<string, SavedScanRecord>();
   const reportPassCost = (key: string, cost: Readonly<ScanCost> | null) => {
     input.onCost(key, cost);
     if (cost === null && input.scanOptions.requireCost)
@@ -313,7 +253,7 @@ export async function runDeepScans(
       "--scan-root",
       join(scanDir, "artifacts/deep-scan/passes"),
     ]);
-    const records = listed["scans"] as unknown as SavedPass[];
+    const records = savedScansFromWorkbench(listed);
     if (recoverOutcomes)
       records.sort((a, b) =>
         (a.completedAt ?? "").localeCompare(b.completedAt ?? ""),
@@ -406,8 +346,7 @@ export async function runDeepScans(
     polling = true;
     void workbench(["get-scan", "--scan-id", scanId])
       .then((result) => {
-        const scan = result["scan"] as JsonObject;
-        const progress = scan["progress"] as JsonObject;
+        const { progress } = savedScanFromWorkbench(result);
         if (
           progress["status"] === "canceled" ||
           progress["status"] === "failed"

@@ -1,3 +1,4 @@
+import { semanticFinding, semanticCoverage } from "./helpers/semantic-scan.js";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import { dirname, join, parse, posix, relative, resolve } from "node:path";
@@ -36,11 +37,13 @@ async function fixture(reports: string[], evidence: string[]) {
     await fs.writeFile(join(scanDir, path), bytes);
     files.set(path, bytes);
   }
-  const findings = reports.map((reportPath) => ({ writeup: { reportPath } }));
+  const findings = reports.map((reportPath) =>
+    semanticFinding({ writeup: { reportPath } }),
+  );
   const input: ScanMergeInput = {
     scanId: "child",
     scanDir,
-    draft: { scanId: "parent", findings, coverage: {} },
+    draft: { scanId: "parent", findings, coverage: semanticCoverage() },
     sourceFindings: structuredClone(findings),
   };
   return { input, files };
@@ -345,9 +348,11 @@ test("report reuse respects intervening aliases, concurrent calls, and changed s
     ["findings/left/sháred/proof.bin", "findings/right/SHA\u0301RED/proof.bin"],
   );
   const reports = [...Array<string>(10).fill(first), second, second, first];
-  input.draft.findings = reports.map((reportPath) => ({
-    writeup: { reportPath },
-  }));
+  input.draft.findings = reports.map((reportPath) =>
+    semanticFinding({
+      writeup: { reportPath },
+    }),
+  );
   input.sourceFindings = structuredClone(input.draft.findings);
   const before = structuredClone(input);
   const run = async () => {
@@ -511,7 +516,7 @@ test("normalized scope prefixes agree with native relative containment", () => {
         scan: { id: "child", scope: { includePaths, excludePaths: [] } },
       },
       findings: { findings },
-      coverage: {},
+      coverage: semanticCoverage(),
     } as unknown as Parameters<typeof scanMergeInput>[0];
     const before = structuredClone(result);
     const expected = findings.filter((finding) =>
