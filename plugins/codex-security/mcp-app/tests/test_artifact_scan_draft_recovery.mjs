@@ -118,8 +118,14 @@ for (const updateSavedSurface of [false, true]) {
       label: "Next review",
       disposition: "reported",
     };
+    const updated = {
+      ...reopened,
+      reason: "Review another caller.",
+      paths: ["src/example.py", "src/other.py"],
+      notes: "The latest checkpoint adds a second caller.",
+    };
     const nextProgress = {
-      ...f.draft({ deferred: [nextTask], surfaces: [nextSurface] }),
+      ...f.draft({ deferred: [updated, nextTask], surfaces: [nextSurface] }),
       findings: [nextFinding],
     };
     for (const input of [nextProgress, f.draft()]) {
@@ -130,6 +136,11 @@ for (const updateSavedSurface of [false, true]) {
         new Set(result.coverage.deferred.map(({ id }) => id)),
         new Set([reopened.id, independent.id, nextTask.id]),
       );
+      assert.deepEqual(
+        result.coverage.deferred.find(({ id }) => id === updated.id),
+        updated,
+      );
+      assert.deepEqual((await f.read()).deferred, result.coverage.deferred);
       assert.deepEqual(result.coverage.resolvedDeferred, [
         close(stillClosed.id),
       ]);
@@ -435,7 +446,8 @@ for (const layout of ["standard", "diff", "worker"]) {
         id: "shared",
         label: "Shared entry point",
         disposition: "needs_follow_up",
-        receiptRefs: [],
+        notes: "The second caller still needs review.",
+        receiptRefs: ["artifacts/pending.md"],
       };
       await f.write(
         f.draft({ surfaces: [surface], deferred: [first, remaining] }),
@@ -443,13 +455,33 @@ for (const layout of ["standard", "diff", "worker"]) {
       const closure = close(first.id);
       for (const resolvedDeferred of [[closure], [closure], undefined]) {
         await f.write(
-          f.draft({ ...(resolvedDeferred ? { resolvedDeferred } : {}) }, true),
+          f.draft(
+            resolvedDeferred
+              ? {
+                  resolvedDeferred,
+                  surfaces: [
+                    {
+                      ...surface,
+                      disposition: "no_issue_found",
+                      notes: "The first caller is reviewed.",
+                      receiptRefs: ["artifacts/reviewed.md"],
+                    },
+                  ],
+                }
+              : {},
+            true,
+          ),
         );
         const saved = await f.read();
         assert.equal(saved.completeness, "partial");
         assert.deepEqual(saved.deferred, [remaining]);
         assert.deepEqual(saved.resolvedDeferred, [closure]);
-        assert.deepEqual(saved.surfaces, [surface]);
+        assert.deepEqual(saved.surfaces, [
+          {
+            ...surface,
+            receiptRefs: ["artifacts/reviewed.md", "artifacts/pending.md"],
+          },
+        ]);
       }
     });
   }

@@ -1195,6 +1195,7 @@ def merge_saved_results(
     closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
 
     candidate_ids: set[tuple[str | None, str]] = set()
+    accepted_deferred_orders: dict[tuple[str | None, str], tuple[int, int]] = {}
     active_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
     coverage_schema = _read_json(
         Path(__file__).resolve().parent.parent / "schemas" / "coverage.schema.json"
@@ -1216,6 +1217,14 @@ def merge_saved_results(
                 previous = active_deferred.get(key)
                 if previous is None or order > previous[0]:
                     active_deferred[key] = (order, item, relative)
+                if (
+                    relative == "parent"
+                    or relative in current_results
+                    or relative in selected_observations
+                ):
+                    accepted_deferred_orders[key] = max(
+                        accepted_deferred_orders.get(key, order), order
+                    )
         for closure in _resolved_deferred_rows(draft, coverage_schema["resolvedDeferred"]):
             key = (owner, closure["id"])
             previous = closed_deferred.get(key)
@@ -1352,13 +1361,24 @@ def merge_saved_results(
         coverage_schema["surfaces"]["items"],
         deferred_rows,
     )
-    if parent and isinstance(coverage.get("surfaces"), list):
-        previous = parent["coverage"].get("surfaces", [])
-        if isinstance(previous, list):
-            removed_parent = [row for row in previous if id(row) in replaced_surfaces]
-            coverage["surfaces"] = [
-                row for row in coverage["surfaces"] if row not in removed_parent
-            ]
+    replaced_rows = {
+        "surfaces": replaced_surfaces,
+        "deferred": {
+            id(row)
+            for relative, _, owner in all_sources
+            for row in deferred_rows[relative]
+            if isinstance(row, dict)
+            and (key := (owner, row.get("id"))) not in candidate_ids
+            and (updated := accepted_deferred_orders.get(key)) is not None
+            and updated > source_order[relative]
+        },
+    }
+    for field, replaced in replaced_rows.items():
+        if parent and isinstance(coverage.get(field), list):
+            previous = parent["coverage"].get(field, [])
+            if isinstance(previous, list):
+                removed_parent = [row for row in previous if id(row) in replaced]
+                coverage[field] = [row for row in coverage[field] if row not in removed_parent]
     if isinstance(coverage.get("surfaces"), list):
         for surface in surface_updates:
             if surface not in coverage["surfaces"]:
@@ -1598,7 +1618,7 @@ def merge_saved_results(
                     )
                 ):
                     continue
-                if field == "surfaces" and id(item) in replaced_surfaces:
+                if id(item) in replaced_rows.get(field, ()):
                     continue
                 if (
                     field == "deferred"

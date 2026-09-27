@@ -171,6 +171,28 @@ def test_two_unmatched_raw_candidates_keep_distinct_stable_ids(tmp_path: Path, s
     assert replay[2] == documents[2]
 
 
+def test_accepted_generic_update_keeps_its_id_in_frozen_recovery(tmp_path: Path, saved_results):
+    original = {"id": "source-review", "reason": "Review remains.", "paths": ["api.py"]}
+    updated = {**original, "reason": "Review the remaining caller.", "paths": ["caller.py"]}
+    initial = saved_draft("identity-scan", deferred=[original], complete=True)
+    progress = saved_draft("identity-scan", deferred=[updated])
+    worker = save_worker(tmp_path, saved_results, "reviewer", [initial, progress], initial)
+    output = Path(worker["artifact_dir"])
+    result = output / "result.json"
+    os.utime(result, ns=(100, 100))
+    head = output / "checkpoint-head.json"
+    head.write_text(json.dumps({"checkpoint": f"{saved_results._digest(progress)}.json"}))
+    os.utime(head, ns=(200, 200))
+    originals = {path: path.read_bytes() for path in [result, *output.glob("checkpoints/*.json")]}
+    documents = recover(tmp_path, saved_results, [worker])
+    replay = recover(tmp_path, saved_results, [worker], documents[0]["scan"]["preservedSources"])
+    for document in (documents, replay):
+        pending = [row for row in document[2]["deferred"] if row["id"] != "scan-stopped"]
+        assert pending == [updated]
+    assert replay[2] == documents[2]
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
 def test_unnamed_changed_observation_stays_pending(tmp_path: Path, saved_results):
     generic = {"reason": "Review remains.", "paths": ["api.py"], "notes": "Initial review."}
     identity = "source-review"

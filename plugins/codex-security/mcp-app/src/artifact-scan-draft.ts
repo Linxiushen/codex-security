@@ -431,6 +431,10 @@ async function preserveScanDraft(
       result.coverage = preserveScanCoverage(
         {
           ...result.coverage,
+          deferred: (progress.coverage.deferred as JsonObject[]).filter(
+            (row) =>
+              !terminalOutcomeIds.has((row.candidateId ?? row.id) as string),
+          ),
           surfaces: (progress.coverage.surfaces as JsonObject[]).filter(
             (surface) =>
               !terminalOutcomeIds.has(surface.id as string) &&
@@ -857,8 +861,16 @@ function reconcileDeferredSurfaces(
           row.id === id ||
           ((row.surfaceIds as string[] | undefined) ?? []).includes(id),
       )
-    )
-      continue;
+    ) {
+      const followUp = previousSurfaces.find(
+        (row) => row.disposition === "needs_follow_up",
+      );
+      if (!followUp) continue;
+      surface = {
+        ...structuredClone(followUp),
+        receiptRefs: surface.receiptRefs,
+      };
+    }
     const linked = matches.some(
       ({ surfaces, deferred }) =>
         surfaces.length > 0 &&
