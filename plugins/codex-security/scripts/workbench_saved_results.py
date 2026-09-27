@@ -954,7 +954,8 @@ def merge_saved_results(
                 or relative in parent["previousParentCheckpoints"]
             )
         ) or (
-            relative not in current_results
+            worker_id is not None
+            and relative not in current_results
             and any(
                 saved_worker == worker_id
                 and saved_path in current_results
@@ -1013,7 +1014,10 @@ def merge_saved_results(
             }:
                 surfaces = coverage.get("surfaces")
                 for item in surfaces if isinstance(surfaces, list) else []:
-                    if isinstance(item, dict) and item.get("candidateId") == candidate_id:
+                    if isinstance(item, dict) and coverage_candidate(None, item) in {
+                        (worker_id, candidate_id),
+                        (None, candidate_id),
+                    }:
                         if not isinstance(item.get("previousFindings"), list):
                             item["previousFindings"] = []
                         history = item["previousFindings"]
