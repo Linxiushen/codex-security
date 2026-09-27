@@ -483,6 +483,7 @@ export type CodexSecuritySurface = "cli" | "sdk";
 
 interface CodexSecurityRuntimeOptions {
   surface: CodexSecuritySurface;
+  parentScanRole?: "deep_pass";
 }
 
 interface ClientDependencies {
@@ -526,6 +527,7 @@ export class CodexSecurity {
 
   readonly #dependencies: ClientDependencies;
   readonly #surface: CodexSecuritySurface;
+  readonly #parentScanRole: "deep_pass" | undefined;
   readonly #loginHandles = new Set<CodexLoginHandle>();
   readonly #abortController = new AbortController();
   #activeOperation: Promise<unknown> | null = null;
@@ -550,6 +552,7 @@ export class CodexSecurity {
     this.config = structuredClone(config);
     this.#dependencies = dependencies;
     this.#surface = runtimeOptions.surface;
+    this.#parentScanRole = runtimeOptions.parentScanRole;
   }
 
   public async run(
@@ -1788,6 +1791,9 @@ export class CodexSecurity {
               JSON.stringify({
                 recipe,
                 userContext: options.scanPrompt,
+                ...(this.#parentScanRole === undefined
+                  ? {}
+                  : { parentScanRole: this.#parentScanRole }),
                 ...(options.registeredScan === undefined
                   ? {}
                   : {
@@ -2526,7 +2532,7 @@ export class CodexSecurity {
                       ...this.#dependencies,
                       workerNumber: tracker.workerNumber.bind(tracker),
                     },
-                    { surface: this.#surface },
+                    { surface: this.#surface, parentScanRole: "deep_pass" },
                   ),
                 scanOptions: {
                   target: options.target,

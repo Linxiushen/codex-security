@@ -543,6 +543,9 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
               : undefined;
             commands.push({ command: args[0]!, id });
             if (args[0] === "register-cli-scan") {
+              expect(JSON.parse(input!).parentScanRole).toBe(
+                args.includes("--parent-scan-id") ? "deep_pass" : undefined,
+              );
               const scanId = result["scanId"] as string;
               registrations.set(scanId, {
                 ...result,
