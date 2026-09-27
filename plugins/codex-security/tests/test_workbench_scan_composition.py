@@ -27,7 +27,7 @@ def test_stopped_projection_retains_report_and_colliding_evidence(tmp_path: Path
     parent = register(state, target, tmp_path / "parent", mode="deep")
     parent_dir = Path(parent["scanDir"])
     child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
-    child = register(state, target, child_dir, parent=parent["scanId"])
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
     write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
     findings_path = child_dir / "findings.json"
     document = json.loads(findings_path.read_text())
@@ -80,7 +80,7 @@ def recipe(target: Path, mode: str = "standard") -> dict:
 
 
 def register(
-    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, paths=()
+    state: Path, target: Path, directory: Path, *, mode="standard", parent=None, role=None, paths=()
 ) -> dict:
     missing = []
     current = directory
@@ -99,9 +99,9 @@ def register(
         str(target),
         "--scan-dir",
         str(directory),
-        "--recipe-json",
-        json.dumps(saved_recipe),
+        "--registration-json-stdin",
         *(("--parent-scan-id", parent) if parent else ()),
+        input_text=json.dumps({"recipe": saved_recipe, "parentScanRole": role}),
     )
 
 
@@ -111,7 +111,7 @@ def checkpoint(state: Path, scan: dict, *, passes=(), merged=(), terminal=None) 
         "startedAt": "2026-01-01T00:00:00Z",
         "passes": list(passes),
         "mergedScanIds": list(merged),
-        "aggregate": [],
+        "aggregate": None,
         "noNewStreak": 0,
         "consecutiveErrors": 0,
         **({"terminalReason": terminal} if terminal else {}),
@@ -620,7 +620,9 @@ def test_native_legacy_settings_are_returned_only_without_a_saved_recipe(
     children = []
     for index in range(1, 3):
         directory = f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(state, target, scan_dir / directory, parent=scan["scanId"])
+        child = register(
+            state, target, scan_dir / directory, parent=scan["scanId"], role="deep_pass"
+        )
         children.append(child)
         saved_checkpoint["passes"].append({"directory": directory, "scanId": child["scanId"]})
     run_workbench(
@@ -763,7 +765,7 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     pass_directory = "artifacts/deep-scan/passes/pass-1"
     directory = parent_dir / pass_directory
     saved = checkpoint(state, parent, passes=[{"directory": pass_directory}])
-    child = register(state, target, directory, parent=parent["scanId"])
+    child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
     run_workbench(
         state, "set-scan-thread", "--scan-id", child["scanId"], "--thread-id", "child-thread"
     )
@@ -844,6 +846,140 @@ def test_parent_reads_completed_child_after_registration_checkpoint_crash(tmp_pa
     assert completed["executionThreadIds"] == completed["threadIds"]
 
 
+def test_get_scan_loads_one_composition_view(tmp_path: Path, workbench_api, monkeypatch) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    parent = register(state, target, tmp_path / "parent", mode="deep")
+    child = register(
+        state,
+        target,
+        tmp_path / "parent/artifacts/deep-scan/passes/pass-1",
+        parent=parent["scanId"],
+        role="deep_pass",
+    )
+    value = checkpoint(state, parent, passes=[{"directory": "artifacts/deep-scan/passes/pass-1"}])
+    value["legacy"] = {"discoveryRuns": 1, "coverage": {"completeness": "partial"}}
+    path = Path(parent["scanDir"]) / CHECKPOINT
+    path.write_text(json.dumps(value))
+    monkeypatch.setenv("CODEX_SECURITY_STATE_DIR", str(state))
+    load = workbench_api["load_composition"]
+    reader = load.__globals__["read_composition_checkpoint"]
+    with mock.patch.dict(load.__globals__, read_composition_checkpoint=mock.Mock(wraps=reader)):
+        with workbench_api["connect"]() as connection:
+            context = workbench_api["scan_context"](connection, parent["scanId"])
+        load.__globals__["read_composition_checkpoint"].assert_called_once()
+    assert context["scan"]["progress"]["independentReviews"]["active"] == 1
+    assert "aggregate" not in context["compositionCheckpoint"]
+    assert "coverage" not in context["compositionCheckpoint"]["legacy"]
+    assert json.loads(path.read_text()) == value
+    assert child["scanId"] not in {
+        scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]
+    }
+
+
+def test_explicit_child_membership_does_not_depend_on_directory_or_checkpoint(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("print('fixture')\n")
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent"
+    parent = register(state, target, parent_dir, mode="deep")
+    # A generic rerun remains public even when its directory resembles a pass.
+    rerun = register(
+        state,
+        target,
+        parent_dir / "artifacts/deep-scan/passes/ordinary-rerun",
+        parent=parent["scanId"],
+    )
+    child = register(
+        state, target, parent_dir / "saved-child", parent=parent["scanId"], role="deep_pass"
+    )
+    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
+        parent["scanId"],
+        rerun["scanId"],
+    }
+    context = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])
+    assert context["compositionCheckpoint"] is None
+    assert context["scan"]["progress"]["independentReviews"]["active"] == 1
+    write_completed_contract(
+        Path(child["scanDir"]), child["scanId"], target, relative_path="app.py"
+    )
+    run_workbench(
+        state,
+        "fail-scan",
+        "--scan-id",
+        parent["scanId"],
+        "--message",
+        "Stopped.",
+        "--defer-publication",
+    )
+    run_workbench(state, "preserve-scan-results", "--scan-id", parent["scanId"], "--after-stop")
+    retained = run_workbench(state, "get-scan", "--scan-id", parent["scanId"])["scan"]
+    assert retained["findingCount"] == 1
+    assert retained["warnings"] == []
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", child["scanId"])["scan"]["progress"]["status"]
+        == "failed"
+    )
+    assert (
+        run_workbench(state, "get-scan", "--scan-id", rerun["scanId"])["scan"]["progress"]["status"]
+        == "running"
+    )
+
+
+@pytest.mark.parametrize("missing_outputs", [False, True])
+def test_membership_migration_backfills_stored_paths_once(
+    tmp_path: Path, missing_outputs: bool
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    state = tmp_path / "state"
+    parent_dir = tmp_path / "parent.previous-synthetic"
+    parent = register(state, target, parent_dir, mode="deep")
+    child = register(
+        state, target, parent_dir / "artifacts/deep-scan/passes/pass-1", parent=parent["scanId"]
+    )
+    rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
+    database = state / "workbench.sqlite3"
+    marker = parent_dir / "saved-output.txt"
+    marker.write_bytes(b"Saved outputs must not change during migration.")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP INDEX scans_by_composition_parent")
+        connection.execute("ALTER TABLE scans DROP COLUMN parent_scan_role")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 43")
+        before = connection.execute(
+            "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
+        ).fetchall()
+    if missing_outputs:
+        parent_dir.rename(tmp_path / "removed-output")
+    run_workbench(state, "database-info")
+    run_workbench(state, "database-info")
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT id, parent_scan_id, scan_dir, status FROM scans ORDER BY id"
+            ).fetchall()
+            == before
+        )
+        assert dict(connection.execute("SELECT id, parent_scan_role FROM scans")) == {
+            parent["scanId"]: None,
+            child["scanId"]: "deep_pass",
+            rerun["scanId"]: None,
+        }
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 43"
+        ).fetchone() == (1,)
+    saved_marker = tmp_path / "removed-output/saved-output.txt" if missing_outputs else marker
+    assert saved_marker.read_bytes() == b"Saved outputs must not change during migration."
+    assert {scan["scanId"] for scan in run_workbench(state, "list-scans")["scans"]} == {
+        parent["scanId"],
+        rerun["scanId"],
+    }
+
+
 def test_failed_deep_scan_keeps_followup_thread_before_composition_checkpoint(
     tmp_path: Path,
 ) -> None:
@@ -877,7 +1013,9 @@ def test_history_hides_composition_children_without_parent_artifacts(
     parent = register(state, target, parent_dir, mode="deep")
     rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
     child_path = "artifacts/deep-scan/passes/pass-1"
-    child = register(state, target, parent_dir / child_path, parent=parent["scanId"])
+    child = register(
+        state, target, parent_dir / child_path, parent=parent["scanId"], role="deep_pass"
+    )
     checkpoint(state, parent, passes=[{"directory": child_path, "scanId": child["scanId"]}])
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         for day, scan in enumerate((parent, rerun, child), 1):
@@ -933,7 +1071,9 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
     directory = tmp_path / "scan"
     parent = register(state, target, directory, mode="deep")
     child_path = "artifacts/deep-scan/passes/pass-1"
-    child = register(state, target, directory / child_path, parent=parent["scanId"])
+    child = register(
+        state, target, directory / child_path, parent=parent["scanId"], role="deep_pass"
+    )
     saved = checkpoint(state, parent, passes=[{"directory": child_path}])
     unrelated = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
     for scan in (child, unrelated):
@@ -1009,7 +1149,9 @@ def test_archiving_composition_preserves_children_and_reuses_pass_directories(
             assert dict(actual) == artifact
             assert Path(actual["path"]).is_file()
         assert connection.execute("SELECT * FROM finding_occurrences").fetchall() == old_findings
-    replacement = register(state, target, directory / child_path, parent=current["scanId"])
+    replacement = register(
+        state, target, directory / child_path, parent=current["scanId"], role="deep_pass"
+    )
     assert replacement["scanId"] != child["scanId"]
     assert replacement["scanDir"] == str(directory / child_path)
 
@@ -1077,7 +1219,7 @@ def test_native_cancel_retains_accepted_and_later_unmerged_findings(
     children = []
     for index, anchor in enumerate(("accepted-finding", "separate-unmerged-finding"), 1):
         directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(state, target, directory, parent=parent["scanId"])
+        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
         write_completed_contract(
             directory, child["scanId"], target, relative_path="app.py", identity_anchor=anchor
         )
@@ -1165,7 +1307,7 @@ def test_stopped_parent_keeps_writeup_and_colliding_evidence(tmp_path: Path) -> 
     parent_dir = Path(parent["scanDir"])
     pass_directory = "artifacts/deep-scan/passes/pass-1"
     child_dir = parent_dir / pass_directory
-    child = register(state, target, child_dir, parent=parent["scanId"])
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
     write_completed_contract(child_dir, child["scanId"], target, relative_path="app.py")
     findings_path = child_dir / "findings.json"
     findings = json.loads(findings_path.read_text())
@@ -1230,7 +1372,9 @@ def test_terminal_scoped_parent_preserves_unmerged_child_results(
     children = []
     for index in (1, 2):
         directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(state, target, directory, parent=parent["scanId"], paths=["src"])
+        child = register(
+            state, target, directory, parent=parent["scanId"], role="deep_pass", paths=["src"]
+        )
         write_completed_contract(
             directory,
             child["scanId"],
@@ -1457,7 +1601,7 @@ def test_deferred_stop_retains_drained_child_and_cost_before_freezing(
     parent = register(state, target, tmp_path / "scan", mode="deep")
     parent_dir = Path(parent["scanDir"])
     child_dir = parent_dir / "artifacts/deep-scan/passes/pass-1"
-    child = register(state, target, child_dir, parent=parent["scanId"])
+    child = register(state, target, child_dir, parent=parent["scanId"], role="deep_pass")
     rerun = register(state, target, tmp_path / "rerun", parent=parent["scanId"])
     checkpoint(state, parent, passes=[{"directory": child_dir.relative_to(parent_dir).as_posix()}])
     run_workbench(
@@ -1637,7 +1781,7 @@ def test_cancel_before_first_merge_preserves_ordinary_children(
     children = []
     for index in (1, 2):
         directory = parent_dir / f"artifacts/deep-scan/passes/pass-{index}"
-        child = register(state, target, directory, parent=parent["scanId"])
+        child = register(state, target, directory, parent=parent["scanId"], role="deep_pass")
         write_completed_contract(directory, child["scanId"], target, relative_path="app.py")
         findings_path = directory / "findings.json"
         findings = json.loads(findings_path.read_text())["findings"]

@@ -12,8 +12,8 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_scan_history as scan_history
+from workbench_composition import composition_child_ids
 from workbench_constants import FINDING_SUMMARY_BYTES, FINDING_TITLE_BYTES, FINDINGS_PAGE_MAX
-from workbench_scan_start import composition_child_ids
 from workbench_validation import bounded_output_text
 
 

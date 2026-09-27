@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workbench_scan_start import composition_child_ids
+from workbench_composition import composition_child_ids
 
 
 def upsert_finding(

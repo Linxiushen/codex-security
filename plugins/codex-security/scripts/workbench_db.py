@@ -54,6 +54,12 @@ from workbench.storage import (
     state_dir,
 )
 from workbench_cli import parse_args
+from workbench_composition import (
+    CompositionView,
+    composition_children,
+    load_composition,
+    read_composition_checkpoint,
+)
 from workbench_constants import (
     ARTIFACTS,
     CLAIM_LEASE_SECONDS,
@@ -87,9 +93,7 @@ from workbench_findings import (
 from workbench_remediation import remediation_claim_is_active
 from workbench_scan_start import (
     archive_scan,
-    composition_children,
     insert_running_scan,
-    read_composition_checkpoint,
     safe_segment,
     scan_diff_identity,
     scan_target_identity,
@@ -1536,6 +1540,11 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
         if args.parent_scan_id is not None
         else None
     )
+    parent_scan_role = registration.get("parentScanRole")
+    if parent_scan_role not in (None, "deep_pass"):
+        raise SystemExit("Unsupported scan parent role.")
+    if parent_scan_role == "deep_pass" and (parent_scan_id is None or mode != "standard"):
+        raise SystemExit("A Deep Scan pass must be a Standard scan with a parent.")
     timestamp = now()
     scan_id = str(uuid.uuid4())
     workspace_id = str(uuid.uuid4())
@@ -1548,6 +1557,8 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             parent = require_scan(connection, parent_scan_id)
             if parent["target_id"] != target_id:
                 raise SystemExit("A rerun must belong to the same repository as its parent scan.")
+            if parent_scan_role == "deep_pass" and parent["mode"] != "deep":
+                raise SystemExit("A Deep Scan pass must belong to a Deep Scan parent.")
 
         connection.execute(
             """
@@ -1586,10 +1597,12 @@ def register_cli_scan(connection: sqlite3.Connection, args: argparse.Namespace) 
             scan_dir=scan_dir,
         )
         connection.execute(
-            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, user_context = ? WHERE id = ?",
+            "UPDATE scans SET recipe_json = ?, parent_scan_id = ?, parent_scan_role = ?, "
+            "user_context = ? WHERE id = ?",
             (
                 json.dumps(recipe, allow_nan=False, separators=(",", ":"), sort_keys=True),
                 parent_scan_id,
+                parent_scan_role,
                 user_context,
                 scan_id,
             ),
@@ -2526,8 +2539,11 @@ def scan_context(
     occurrence_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
-    result = scan_result(connection, scan, occurrence_id=occurrence_id)
-    workspace_result = result if occurrence_id is None else scan_result(connection, scan)
+    composition = load_composition(connection, scan)
+    result = scan_result(connection, scan, occurrence_id=occurrence_id, composition=composition)
+    workspace_result = (
+        result if occurrence_id is None else scan_result(connection, scan, composition=composition)
+    )
     workspace = workspace_state(
         connection,
         scan["workspace_id"],
@@ -2540,11 +2556,13 @@ def scan_context(
         "workspace": workspace,
     }
     if scan["mode"] == "deep":
-        checkpoint = read_composition_checkpoint(scan)
+        checkpoint = composition.checkpoint
         if checkpoint is not None:
-            checkpoint.pop("aggregate", None)
+            checkpoint = {key: value for key, value in checkpoint.items() if key != "aggregate"}
             if isinstance(checkpoint.get("legacy"), dict):
-                checkpoint["legacy"].pop("coverage", None)
+                checkpoint["legacy"] = {
+                    key: value for key, value in checkpoint["legacy"].items() if key != "coverage"
+                }
         context["compositionCheckpoint"] = checkpoint
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
@@ -2599,7 +2617,9 @@ def scan_result(
     scan: sqlite3.Row,
     *,
     occurrence_id: str | None = None,
+    composition: CompositionView | None = None,
 ) -> dict[str, Any]:
+    composition = composition if composition is not None else load_composition(connection, scan)
     backfill_legacy_finding_details(connection, scan)
     progress = connection.execute(
         "SELECT * FROM scan_progress WHERE scan_id = ?", (scan["id"],)
@@ -2644,7 +2664,7 @@ def scan_result(
     }
     remediation_available, remediation_unavailable_reason = remediation_availability(scan)
     independent_reviews = (
-        scan_history.independent_review_progress(connection, scan)
+        scan_history.independent_review_progress(connection, scan, composition)
         if scan["mode"] == "deep"
         else None
     )
@@ -2686,8 +2706,10 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        "threadIds": scan_usage._scan_root_thread_ids(
+            connection, scan, None, composition=composition
+        ),
+        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan, composition),
         "failureMessage": scan["failure_message"],
         "findings": [
             finding_result(connection, scan, row, related=relations.get(row["id"], []))
@@ -2708,7 +2730,7 @@ def scan_result(
         "remediationUnavailableReason": remediation_unavailable_reason,
         "reportAvailable": "markdownReport" in artifacts,
         "resultsRecoveryNeeded": saved_results.scan_results_recovery_needed(
-            _WORKBENCH_DB_CONTEXT, connection, scan
+            _WORKBENCH_DB_CONTEXT, connection, scan, composition
         ),
         "scanDir": scan["scan_dir"],
         "scanId": scan["id"],

@@ -11,13 +11,11 @@ import tempfile
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from filesystem_identity import serialize_filesystem_identity
-from finalize_scan_contract import ContractError, _read_scan_local_json, write_scan_local_bytes
-from workbench.storage import scan_completion_lock
+from finalize_scan_contract import write_scan_local_bytes
 from workbench_feedback import get_scan_feedback
 from workbench_target import (
     directory_content_digest,
@@ -25,50 +23,6 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, user_text
-
-COMPOSITION_CHECKPOINT = "artifacts/deep-scan/checkpoint.json"
-
-
-def read_composition_checkpoint(scan: sqlite3.Row) -> dict[str, Any] | None:
-    scan_dir = Path(scan["scan_dir"])
-    try:
-        (scan_dir / COMPOSITION_CHECKPOINT).lstat()
-    except FileNotFoundError:
-        return None
-    with scan_completion_lock(scan["id"]):
-        checkpoint = _read_scan_local_json(scan_dir, COMPOSITION_CHECKPOINT, "Deep Scan checkpoint")
-    if checkpoint.get("version") != 2:
-        raise ContractError("Unsupported Deep Scan checkpoint version.")
-    return checkpoint
-
-
-def composition_children(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[sqlite3.Row]:
-    checkpoint = read_composition_checkpoint(scan)
-    if checkpoint is None:
-        return []
-    directories = {str(Path(scan["scan_dir"]) / item["directory"]) for item in checkpoint["passes"]}
-    return [
-        child
-        for child in connection.execute(
-            "SELECT * FROM scans WHERE parent_scan_id = ? AND mode = 'standard' ORDER BY started_at, id",
-            (scan["id"],),
-        )
-        if child["scan_dir"] in directories
-    ]
-
-
-def composition_child_ids(connection: sqlite3.Connection) -> set[str]:
-    children = connection.execute(
-        "SELECT children.id, children.scan_dir, parents.scan_dir AS parent_scan_dir "
-        "FROM scans AS children JOIN scans AS parents ON parents.id = children.parent_scan_id "
-        "WHERE parents.mode = 'deep' AND children.mode = 'standard'"
-    )
-    return {
-        child["id"]
-        for child in children
-        if Path(child["scan_dir"]).parent
-        == Path(child["parent_scan_dir"]) / "artifacts/deep-scan/passes"
-    }
 
 
 def safe_segment(value: str) -> str:

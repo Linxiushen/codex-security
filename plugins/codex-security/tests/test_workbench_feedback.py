@@ -327,13 +327,16 @@ def test_internal_child_keeps_false_positive_feedback_without_parent_checkpoint(
         str(child_dir),
         "--parent-scan-id",
         str(parent["scanId"]),
-        "--recipe-json",
-        json.dumps(
+        "--registration-json-stdin",
+        input_text=json.dumps(
             {
-                "repository": str(target),
-                "target": {"kind": "repository", "paths": []},
-                "mode": "standard",
-                "config": {"model": "synthetic-model"},
+                "parentScanRole": "deep_pass",
+                "recipe": {
+                    "repository": str(target),
+                    "target": {"kind": "repository", "paths": []},
+                    "mode": "standard",
+                    "config": {"model": "synthetic-model"},
+                },
             }
         ),
     )

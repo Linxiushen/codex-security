@@ -542,13 +542,16 @@ def test_completion_counts_ordinary_child_scans_and_descendants(tmp_path: Path) 
         str(directory),
         "--parent-scan-id",
         fixture.scan_id,
-        "--recipe-json",
-        json.dumps(
+        "--registration-json-stdin",
+        input_text=json.dumps(
             {
-                "repository": str(fixture.target),
-                "mode": "standard",
-                "target": {"kind": "repository", "paths": []},
-                "config": {},
+                "parentScanRole": "deep_pass",
+                "recipe": {
+                    "repository": str(fixture.target),
+                    "mode": "standard",
+                    "target": {"kind": "repository", "paths": []},
+                    "config": {},
+                },
             }
         ),
         environment=environment,

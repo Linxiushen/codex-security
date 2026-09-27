@@ -105,13 +105,16 @@ try {
           childDir,
           "--parent-scan-id",
           scanId,
-          "--recipe-json-stdin",
+          "--registration-json-stdin",
         ],
         JSON.stringify({
-          repository: repo,
-          mode: "standard",
-          target: { kind: "repository", paths: [] },
-          config: {},
+          recipe: {
+            repository: repo,
+            mode: "standard",
+            target: { kind: "repository", paths: [] },
+            config: {},
+          },
+          parentScanRole: "deep_pass",
         }),
       );
       const childId = child["scanId"] as string;

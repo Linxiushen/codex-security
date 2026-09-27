@@ -335,6 +335,8 @@ def test_composition_occurrences_only_publish_through_parent_or_explicit_import(
                 ),
             )
 
+        connection.execute("UPDATE scans SET parent_scan_role = 'deep_pass' WHERE id = 'child'")
+
     example = json.loads(
         (Path(__file__).parents[1] / "examples/completed-scan/findings.json").read_text()
     )["findings"][0]

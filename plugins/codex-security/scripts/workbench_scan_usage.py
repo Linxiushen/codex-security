@@ -14,7 +14,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-EXECUTION_THREADS = "artifacts/deep-scan/execution-threads.json"
+# Some plugin hosts launch Python with safe-path isolation enabled.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from workbench_composition import (
+    CompositionView,
+    composition_children,
+    composition_execution_threads,
+)
 
 TOKEN_FIELDS = {
     "input_tokens": "inputTokens",
@@ -178,6 +185,7 @@ def _scan_root_thread_ids(
     supplied_thread_id: str | None,
     *,
     include_owner_threads: bool = True,
+    composition: CompositionView | None = None,
 ) -> list[str]:
     candidates: list[str | None] = [supplied_thread_id]
     if include_owner_threads:
@@ -192,28 +200,17 @@ def _scan_root_thread_ids(
         if workspace is not None:
             candidates.append(workspace["thread_id"])
     if scan["mode"] == "deep":
-        from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
-        from workbench_scan_start import composition_children
-
-        scan_dir = Path(scan["scan_dir"])
-        try:
-            (scan_dir / EXECUTION_THREADS).lstat()
-        except FileNotFoundError:
-            pass
-        else:
-            descriptor = open_scan_local_file_descriptor(
-                scan_dir, EXECUTION_THREADS, "Deep Scan execution threads"
-            )
-            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
-                additional = json.load(handle)
-            if not isinstance(additional, list) or any(
-                not isinstance(thread_id, str) for thread_id in additional
-            ):
-                raise ContractError("Deep Scan execution threads must be an array of strings.")
-            candidates.extend(additional)
         candidates.extend(
-            child["continuation_thread_id"] for child in composition_children(connection, scan)
+            composition.execution_threads
+            if composition is not None
+            else composition_execution_threads(scan)
         )
+        children = (
+            composition.children
+            if composition is not None
+            else composition_children(connection, scan)
+        )
+        candidates.extend(child["continuation_thread_id"] for child in children)
         candidates.extend(
             row["sdk_thread_id"]
             for row in connection.execute(
@@ -235,13 +232,16 @@ def _scan_root_thread_ids(
     return roots
 
 
-def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
+def _scan_execution_thread_ids(
+    connection: sqlite3.Connection, scan: sqlite3.Row, composition: CompositionView | None = None
+) -> list[str]:
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
     return _scan_root_thread_ids(
         connection,
         scan,
         scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
         include_owner_threads=False,
+        composition=composition,
     )
 
 

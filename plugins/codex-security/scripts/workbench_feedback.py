@@ -12,6 +12,7 @@ from typing import Any
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from workbench_composition import composition_child_ids
 from workbench_constants import (
     FINDING_LOCATION_PATH_BYTES,
     FINDING_SUMMARY_BYTES,
@@ -21,8 +22,6 @@ from workbench_validation import bounded_output_text
 
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
-    from workbench_scan_start import composition_child_ids
-
     rows = connection.execute(
         """
         WITH ranked_decisions AS (

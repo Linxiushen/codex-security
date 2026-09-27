@@ -17,13 +17,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import ContractError, _prepare_scan_finalization
 from report_projection import SEVERITY_ORDER
 from workbench.handoff import require_current_continuation
-from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
-from workbench_scan_start import (
+from workbench_composition import (
+    CompositionView,
     composition_child_ids,
-    composition_children,
+    load_composition,
     read_composition_checkpoint,
-    scan_target_identity,
 )
+from workbench_constants import ARTIFACTS, FINDINGS_PAGE_MAX
+from workbench_scan_start import scan_target_identity
 from workbench_scan_usage import stored_scan_cost_fields
 from workbench_target import git_output, require_scan_target_identity
 from workbench_validation import reject_non_finite_json
@@ -162,27 +163,32 @@ def require_composition_complete(connection: sqlite3.Connection, scan: sqlite3.R
 
 
 def independent_review_progress(
-    connection: sqlite3.Connection, scan: sqlite3.Row
+    connection: sqlite3.Connection,
+    scan: sqlite3.Row,
+    composition: CompositionView | None = None,
 ) -> dict[str, Any] | None:
-    run = connection.execute(
-        "SELECT completion_sequence, updated_at, max_discovery_runs FROM deep_scan_runs WHERE scan_id = ?",
-        (scan["id"],),
-    ).fetchone()
-    checkpoint = read_composition_checkpoint(scan)
-    if checkpoint is not None:
-        children = composition_children(connection, scan)
+    composition = composition if composition is not None else load_composition(connection, scan)
+    run = composition.legacy_run
+    checkpoint = composition.checkpoint
+    if checkpoint is not None or composition.children:
+        children = composition.children
         recipe = json.loads(scan["recipe_json"]) if scan["recipe_json"] else {}
-        legacy = run if checkpoint.get("legacy") is not None else None
+        legacy = run if checkpoint is not None and checkpoint.get("legacy") is not None else None
         return {
             "active": sum(child["status"] == "running" for child in children),
             "completed": sum(child["status"] == "complete" for child in children)
             + (legacy["completion_sequence"] if legacy is not None else 0),
             "maximum": recipe.get("deepScan", {}).get(
                 "maxDiscoveryRuns",
-                legacy["max_discovery_runs"] if legacy is not None else len(checkpoint["passes"]),
+                legacy["max_discovery_runs"]
+                if legacy is not None
+                else len(checkpoint["passes"])
+                if checkpoint is not None
+                else len(children),
             ),
             "consolidating": any(
-                child["status"] == "complete" and child["id"] not in checkpoint["mergedScanIds"]
+                child["status"] == "complete"
+                and (checkpoint is None or child["id"] not in checkpoint["mergedScanIds"])
                 for child in children
             ),
             "updatedAt": max([scan["updated_at"], *(child["updated_at"] for child in children)]),

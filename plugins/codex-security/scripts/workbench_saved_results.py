@@ -38,12 +38,15 @@ from finalize_scan_contract import (
     open_scan_local_file_descriptor,
     write_scan_local_bytes,
 )
-from workbench_constants import PHASES
-from workbench_scan_start import (
+from workbench_composition import (
     COMPOSITION_CHECKPOINT,
+    CompositionCheckpoint,
+    CompositionView,
     composition_children,
+    encode_composition_checkpoint,
     read_composition_checkpoint,
 )
+from workbench_constants import PHASES
 from workbench_scan_usage import _timestamp, stored_scan_cost_fields
 from workbench_target import committed_diff_snapshot_digest
 from workbench_validation import path_within_scope
@@ -221,7 +224,9 @@ def _source_digests(value: Any, label: str) -> dict[str, str]:
     return value
 
 
-def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
+def _saved_results_changed(
+    db: Any, connection: Any, scan: Any, composition: CompositionView | None = None
+) -> bool:
     try:
         scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
         manifest_path = db.artifact_path(scan_dir, db.ARTIFACTS["manifest"], required=False)
@@ -230,11 +235,10 @@ def _saved_results_changed(db: Any, connection: Any, scan: Any) -> bool:
             "FROM deep_scan_workers WHERE scan_id = ?",
             (scan["id"],),
         ).fetchall()
-        paths = dict(
-            _saved_result_paths(
-                scan_dir, workers if read_composition_checkpoint(scan) is None else []
-            )
+        checkpoint = (
+            composition.checkpoint if composition is not None else read_composition_checkpoint(scan)
         )
+        paths = dict(_saved_result_paths(scan_dir, workers if checkpoint is None else []))
         frozen_sources = scan["retained_source_digests_json"]
 
         def has_saved_source() -> bool:
@@ -346,7 +350,9 @@ def _recovery_source_digests(db: Any, connection: Any, scan: Any) -> tuple[dict[
     return recovery_sources, include_parent
 
 
-def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
+def scan_results_recovery_needed(
+    db: Any, connection: Any, scan: Any, composition: CompositionView | None = None
+) -> bool:
     if scan["status"] != "failed" or scan["canceled_at"] is not None:
         return False
     warnings = json.loads(scan["completion_warnings_json"])
@@ -361,7 +367,7 @@ def scan_results_recovery_needed(db: Any, connection: Any, scan: Any) -> bool:
     ).fetchone()
     if publication_error is not None and publication_error["publication_error_message"]:
         return True
-    return _saved_results_changed(db, connection, scan)
+    return _saved_results_changed(db, connection, scan, composition)
 
 
 def _finding_key(finding: dict[str, Any]) -> str:
@@ -1282,7 +1288,7 @@ def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
         for worker in workers
         if run["status"] == "running"
     )
-    checkpoint = {
+    checkpoint: CompositionCheckpoint = {
         "version": 2,
         "startedAt": run["created_at"],
         "passes": [],
@@ -1315,7 +1321,9 @@ def migrate_legacy_scan(db: Any, connection: Any, scan: Any) -> Any:
             "continuation_thread_id), continuation_thread_id = NULL WHERE id = ?",
             (scan["id"],),
         )
-    write_scan_local_bytes(scan_dir, COMPOSITION_CHECKPOINT, _encoded(checkpoint))
+    write_scan_local_bytes(
+        scan_dir, COMPOSITION_CHECKPOINT, encode_composition_checkpoint(checkpoint)
+    )
     retire_legacy_run(connection, scan["id"])
     return db.require_scan(connection, scan["id"])
 
@@ -1438,10 +1446,11 @@ def save_composed_checkpoint(
 ) -> dict[str, Any] | None:
     """Retain accepted progress and unmerged ordinary child observations."""
     checkpoint = read_composition_checkpoint(scan)
-    if checkpoint is None:
-        return None
     children = {child["scan_dir"]: child for child in composition_children(connection, scan)}
-    aggregate = copy.deepcopy(checkpoint["aggregate"])
+    if checkpoint is None and not children:
+        return None
+    merged_ids = set(checkpoint["mergedScanIds"]) if checkpoint is not None else set()
+    aggregate = copy.deepcopy(checkpoint["aggregate"]) if checkpoint is not None else None
     if not isinstance(aggregate, dict):
         aggregate = {"findings": [], "coverage": {}}
     represented = set()
@@ -1451,7 +1460,7 @@ def save_composed_checkpoint(
             represented.update(provenance.get("sourceFindingIds", []))
             represented.update(source["id"] for source in provenance.get("sourceFindings", []))
     for child in children.values():
-        if child["id"] in checkpoint["mergedScanIds"]:
+        if child["id"] in merged_ids:
             continue
         try:
             draft = _stopped_child_draft(db, child, scan_dir)
@@ -1474,10 +1483,15 @@ def save_composed_checkpoint(
     coverage = aggregate.setdefault("coverage", {})
     coverage["completeness"] = "partial"
     deferred = coverage.setdefault("deferred", [])
-    for item in checkpoint["passes"]:
-        directory = Path(scan["scan_dir"]) / item["directory"]
+    directories = (
+        dict.fromkeys(Path(scan["scan_dir"]) / item["directory"] for item in checkpoint["passes"])
+        if checkpoint is not None
+        else {}
+    )
+    directories.update((Path(directory), None) for directory in children)
+    for directory in directories:
         child = children.get(str(directory))
-        if child is not None and child["id"] in checkpoint["mergedScanIds"]:
+        if child is not None and child["id"] in merged_ids:
             continue
         relative = directory.relative_to(scan_dir).as_posix()
         note = {
