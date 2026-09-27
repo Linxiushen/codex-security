@@ -21,7 +21,7 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { build } from "esbuild";
 import { CodexSecurity, type ScanOptions } from "../src/api.js";
 import type { JsonObject } from "../src/config.js";
-import type { ScanSessionEvent } from "../src/cost.js";
+import { estimateScanCost, type ScanSessionEvent } from "../src/cost.js";
 import type { ScanCost } from "../src/cost-model.js";
 import type { ScanActivity } from "../src/scan-activity.js";
 import {
@@ -35,7 +35,10 @@ import {
   ScanCostTrackingError,
 } from "../src/deep-scan.js";
 import { ScanTransportClosedError } from "../src/scan-execution.js";
-import { ScanCostLimitExceededError } from "../src/errors.js";
+import {
+  ScanCostLimitExceededError,
+  ScanInterruptedError,
+} from "../src/errors.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { readSavedScanLogs, type ScanLogSource } from "../src/scan-logs.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
@@ -103,6 +106,7 @@ afterEach(async () => {
 
 test.each([
   { workers: 1, budget: false, emptyDeadline: true },
+  { workers: 1, budget: false, emptyDeadline: true, measuredChild: true },
   { workers: 1, budget: false, emptyDeadline: true, lostCompletion: true },
   { workers: 1, budget: false, knowledge: true },
   { workers: 1, budget: false, provider: undefined },
@@ -117,6 +121,7 @@ test.each([
   },
   { workers: 1, budget: false, native: "feedback" },
   { workers: 1, budget: false, native: "discovery" },
+  { workers: 1, budget: false, native: "discovery", userCancel: true },
   { workers: 1, budget: false, native: "sealed" },
   { workers: 1, budget: false, trackingFailure: true },
   { workers: 1, budget: false, artifactFailure: "directory" },
@@ -152,6 +157,8 @@ test.each([
   emptyDeadline?: boolean;
   lostCompletion?: boolean;
   knowledge?: boolean;
+  measuredChild?: boolean;
+  userCancel?: boolean;
 }[])(
   "Deep composes sealed ordinary scans and preserves a budgeted parent: %j",
   async ({
@@ -169,6 +176,8 @@ test.each([
     emptyDeadline,
     lostCompletion,
     knowledge,
+    measuredChild,
+    userCancel,
   }) => {
     const python = Bun.which("python3") ?? Bun.which("python");
     if (python === null) throw new Error("Python is required for this test.");
@@ -496,6 +505,70 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                 await writeFile(knowledgePath, "Changed policy.");
               if (emptyDeadline && JSON.parse(input!).recipe.mode === "deep")
                 result["startedAt"] = "2020-01-01T00:00:00Z";
+              if (measuredChild && JSON.parse(input!).recipe.mode === "deep") {
+                const directory = "artifacts/deep-scan/passes/pass-1";
+                const childDirectory = join(scanDir, directory);
+                await mkdir(childDirectory, { recursive: true, mode: 0o700 });
+                const recipe = JSON.parse(input!).recipe;
+                recipe.mode = "standard";
+                delete recipe.deepScan;
+                const child = await runWorkbench(
+                  options,
+                  [
+                    "register-cli-scan",
+                    "--repository",
+                    repo,
+                    "--scan-dir",
+                    childDirectory,
+                    "--parent-scan-id",
+                    scanId,
+                    "--registration-json-stdin",
+                  ],
+                  JSON.stringify({ recipe }),
+                );
+                const childId = child["scanId"] as string;
+                registrations.set(childId, { ...child, mode: "standard" });
+                await runWorkbench(options, [
+                  "set-scan-thread",
+                  "--scan-id",
+                  childId,
+                  "--thread-id",
+                  "synthetic-interrupted-child",
+                ]);
+                await runWorkbench(options, [
+                  "fail-scan",
+                  "--scan-id",
+                  childId,
+                  "--message",
+                  "Discovery deadline reached.",
+                  "--cost-json",
+                  JSON.stringify(
+                    estimateScanCost("gpt-6-astra", {
+                      input_tokens: 100,
+                      output_tokens: 20,
+                    }),
+                  ),
+                ]);
+                await runWorkbench(
+                  options,
+                  [
+                    "save-scan-artifact",
+                    "--scan-id",
+                    scanId,
+                    "--artifact-path",
+                    DEEP_SCAN_CHECKPOINT,
+                  ],
+                  JSON.stringify({
+                    version: 2,
+                    startedAt: result["startedAt"],
+                    passes: [{ directory, scanId: childId, failed: true }],
+                    mergedScanIds: [],
+                    aggregate: null,
+                    noNewStreak: 0,
+                    consecutiveErrors: 0,
+                  }),
+                );
+              }
             }
             if (args[0] === "get-cli-scan-resume")
               workbenches.set(result["scanId"] as string, options);
@@ -802,9 +875,11 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                             },
                           }) + "\n",
                         );
-                        const error = new ScanTransportClosedError(
-                          "mcp_transport_closed",
-                        );
+                        const error = userCancel
+                          ? new Error("Synthetic user cancellation")
+                          : new ScanTransportClosedError(
+                              "mcp_transport_closed",
+                            );
                         controller.abort(error);
                         throw error;
                       }
@@ -1040,7 +1115,25 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         expect(result.coverage.completeness).toBe("partial");
         expect(turns).toEqual([]);
         expect(mergeAttempts).toBe(0);
-        expect(registrations.size).toBe(1);
+        expect(registrations.size).toBe(measuredChild ? 2 : 1);
+        if (measuredChild) {
+          const expectedCost = estimateScanCost("gpt-6-astra", {
+            input_tokens: 100,
+            output_tokens: 20,
+          });
+          expect(result.cost).toEqual(expectedCost);
+          const saved = await runWorkbench(commandOptions, [
+            "get-scan",
+            "--scan-id",
+            result.manifest.scan.id,
+          ]);
+          expect(
+            (saved["scan"] as JsonObject)["cost"] as unknown as ScanCost,
+          ).toEqual(expectedCost!);
+          expect(result.turnResult).toMatchObject({
+            usage: { input_tokens: 100, output_tokens: 20 },
+          });
+        }
         const manifest = await readFile(join(scanDir, "scan-manifest.json"));
         scanOptions.resumeScanId = result.manifest.scan.id;
         await expect(run()).rejects.toThrow("Resume requires a running scan");
@@ -1187,15 +1280,24 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         return;
       }
       if (native === "discovery" || native === "sealed") {
-        await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
+        if (userCancel)
+          await expect(run()).rejects.toBeInstanceOf(ScanInterruptedError);
+        else
+          await expect(run()).rejects.toBeInstanceOf(ScanTransportClosedError);
         const saved = await runWorkbench(commandOptions, [
           "get-scan",
           "--scan-id",
           registeredScan!.scanId,
         ]);
         expect(saved["scan"]).toMatchObject({
-          progress: { status: "running" },
+          progress: { status: userCancel ? "canceled" : "running" },
         });
+        if (userCancel) {
+          expect(saved["compositionCheckpoint"]).toMatchObject({
+            terminalReason: "canceled",
+          });
+          return;
+        }
         savedExecutionThread = (saved["scan"] as JsonObject)[
           "continuationThreadId"
         ] as string;

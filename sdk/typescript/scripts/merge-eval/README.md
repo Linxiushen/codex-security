@@ -39,7 +39,7 @@ An explicit model run uses the existing Codex login and incurs model usage:
 bun scripts/merge-eval/run.ts /absolute/path/to/results MODEL 3
 ```
 
-The runner disables plugins, apps, subagents, web search, and network access for
+The runner explicitly disables inherited MCP servers, plugins, apps, subagents, web search, and network access for
 the merge thread. It uses a temporary directory containing only synthetic merge
 inputs. It retains inputs, raw responses, usage, elapsed time, and thread IDs
 for review. The fixture oracle is not included in the prompt or that directory.

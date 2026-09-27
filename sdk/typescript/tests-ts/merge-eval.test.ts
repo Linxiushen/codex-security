@@ -53,3 +53,20 @@ test("accounting for every source does not excuse collapsing independent finding
   ).not.toThrow();
   expect(gradeMerge(collapsed, fixture.expected).length).toBeGreaterThan(0);
 });
+
+test("merge quality requires complete repair, test and control identifiers", () => {
+  const fixture = mergeFixtures().find(
+    (value) => value.name === "independent-similar-titles",
+  )!;
+  for (const [field, wrong] of [
+    ["remediation", "Correct configuration repair-10."],
+    ["remediationTests", ["Verify repair-1-test-other."]],
+    ["preventiveControls", ["Maintain other-repair-1-control."]],
+  ] as const) {
+    const bad = structuredClone(fixture.reference);
+    bad.findings[1]![field] = wrong;
+    expect(gradeMerge(bad, fixture.expected)).toEqual([
+      `Missing canonical ${field} fact ${fixture.expected[1]!.facts[field]![0]}: ["wide:1"].`,
+    ]);
+  }
+});

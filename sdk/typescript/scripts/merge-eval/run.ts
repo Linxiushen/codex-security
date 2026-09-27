@@ -9,6 +9,11 @@ import {
 } from "../../src/scan-merge.js";
 import { mergeFixtures, parentId } from "./fixtures.js";
 import { gradeMerge } from "./grade.js";
+import { disabledMcpServers } from "../../src/scan-comparison.js";
+import {
+  executablePathForSpawn,
+  resolveCodexCommand,
+} from "../../src/runtime.js";
 
 // Explicit developer invocation only; never part of unit tests or a scan.
 const [destination, model, repetitions = "1"] = process.argv.slice(2);
@@ -27,7 +32,15 @@ const pluginRoot = fileURLToPath(
   new URL("../../../../plugins/codex-security/", import.meta.url),
 );
 const validate = await createScanMergeValidator(pluginRoot);
+const environment = Object.fromEntries(
+  Object.entries(process.env).filter(
+    (entry): entry is [string, string] => entry[1] !== undefined,
+  ),
+);
+const command = resolveCodexCommand(environment);
 const codex = new Codex({
+  codexPathOverride: executablePathForSpawn(command.command),
+  env: environment,
   config: {
     project_doc_max_bytes: 0,
     features: {
@@ -36,7 +49,9 @@ const codex = new Codex({
       multi_agent: false,
       multi_agent_v2: { enabled: false },
     },
-    mcp_servers: {},
+    mcp_servers: (await disabledMcpServers(command, undefined, environment, {
+      workingDirectory: tmpdir(),
+    })) as Record<string, { enabled: boolean }>,
   },
 });
 const results = [];

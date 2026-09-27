@@ -1282,7 +1282,6 @@ export class CodexSecurity {
         "prepare-scan-completion",
         "complete-scan",
         "fail-scan",
-        "cancel-scan",
         "preserve-scan-results",
         "update-progress",
         "complete-budget-exhausted-scan",
@@ -2621,9 +2620,7 @@ export class CodexSecurity {
                   checkpoint.legacy?.originThreadId ?? null;
               const usage = await finalize(
                 undefined,
-                thread.id === null && checkpoint.legacy?.cost
-                  ? completeCost(null)
-                  : null,
+                thread.id === null ? completeCost(null) : null,
               );
               const resultThreadId =
                 thread.id ?? checkpoint.legacy?.originThreadId ?? null;

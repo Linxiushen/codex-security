@@ -33,9 +33,13 @@ export function gradeMerge(
     if (object(finding["severity"])["level"] !== expectedGroup.severity)
       errors.push(`Wrong severity: ${key(refs)}.`);
     for (const [field, facts] of Object.entries(expectedGroup.facts)) {
-      const text = JSON.stringify(finding[field] ?? "").toLowerCase();
+      const identifiers = new Set(
+        JSON.stringify(finding[field] ?? "")
+          .toLowerCase()
+          .match(/[a-z0-9_-]+/g),
+      );
       for (const fact of facts)
-        if (!text.includes(fact.toLowerCase()))
+        if (!identifiers.has(fact.toLowerCase()))
           errors.push(`Missing canonical ${field} fact ${fact}: ${key(refs)}.`);
     }
   }

@@ -1145,6 +1145,69 @@ try {
   );
   assert.deepEqual((await readJson(surfaceRoot, "coverage.json")).deferred, []);
 
+  const sharedSurfaceRoot = path.join(
+    root,
+    "independent-candidate-on-reported-surface",
+  );
+  await mkdir(sharedSurfaceRoot);
+  const sharedSurfaceContext = { ...context, root: sharedSurfaceRoot };
+  const unresolved = {
+    candidateId: "candidate-still-pending",
+    surfaceIds: ["pending-surface"],
+    reason: "Independent candidate still needs evidence.",
+  };
+  await recordCodexSecurityScanDraft(sharedSurfaceContext, {
+    ...surfaceDraft,
+    coverage: { ...surfaceDraft.coverage, deferred: [unresolved] },
+  });
+  const resolvedSurfaceDraft = {
+    ...surfaceDraft,
+    complete: true,
+    coverage: {
+      ...surfaceDraft.coverage,
+      completeness: "complete",
+      deferred: [],
+      surfaces: [
+        {
+          ...surfaceDraft.coverage.surfaces[0],
+          candidateId: "candidate-already-reported",
+          disposition: "reported",
+        },
+      ],
+    },
+  };
+  await recordCodexSecurityScanDraft(
+    sharedSurfaceContext,
+    resolvedSurfaceDraft,
+  );
+  const retainedCoverage = await readJson(sharedSurfaceRoot, "coverage.json");
+  assert.equal(retainedCoverage.completeness, "partial");
+  assert.deepEqual(retainedCoverage.deferred, [
+    { ...unresolved, id: unresolved.candidateId },
+  ]);
+  await recordCodexSecurityScanDraft(sharedSurfaceContext, {
+    ...resolvedSurfaceDraft,
+    coverage: {
+      ...resolvedSurfaceDraft.coverage,
+      surfaces: [
+        ...resolvedSurfaceDraft.coverage.surfaces,
+        {
+          label: "Independent candidate review",
+          candidateId: unresolved.candidateId,
+          disposition: "rejected",
+        },
+      ],
+    },
+  });
+  assert.equal(
+    (await readJson(sharedSurfaceRoot, "coverage.json")).completeness,
+    "complete",
+  );
+  assert.deepEqual(
+    (await readJson(sharedSurfaceRoot, "coverage.json")).deferred,
+    [],
+  );
+
   const recorded = await recordCodexSecurityScanDraft(context, input);
   assert.deepEqual(recorded, {
     scanId,
