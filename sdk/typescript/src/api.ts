@@ -172,6 +172,7 @@ import {
   CodexSecurityError,
   ConfigurationError,
   IncompleteScanError,
+  OutputDirectoryError,
   OutputDirectoryNotEmptyError,
   errorMessage,
   safeErrorMessage,
