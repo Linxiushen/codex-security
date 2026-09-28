@@ -78,23 +78,22 @@ def start_headless_standard_scan(
     )
 
 
-def test_create_scan_directory_propagates_missing_root_error() -> None:
+def test_create_private_directory_propagates_missing_root_error() -> None:
     namespace = runpy.run_path(str(SCRIPT), run_name="missing_scan_root_test")
     root = mock.Mock(spec=Path)
     root.parent = root
-    root.exists.side_effect = [False, AssertionError("Missing root was revisited.")]
     failure = FileNotFoundError("Synthetic unavailable drive root.")
     root.mkdir.side_effect = failure
     directory = mock.Mock(spec=Path)
     directory.parent = root
-    directory.exists.return_value = False
+    directory.mkdir.side_effect = FileNotFoundError("Synthetic missing parent.")
 
     with pytest.raises(FileNotFoundError) as raised:
-        namespace["create_scan_directory"](directory)
+        namespace["create_private_directory"](directory)
 
     assert raised.value is failure
     root.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
-    directory.mkdir.assert_not_called()
+    directory.mkdir.assert_called_once_with(mode=0o700, exist_ok=True)
 
 
 def test_headless_standard_scan_starts_without_setup_opt_out(tmp_path: Path) -> None:
