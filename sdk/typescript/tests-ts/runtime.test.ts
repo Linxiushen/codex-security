@@ -5104,7 +5104,7 @@ describe("runtime directories and plugin Python boundary", () => {
   });
 
   test.each([false, true])(
-    "selects workbench Git for the requested target (bound: %s)",
+    "selects workbench Git for the requested target (bound: %p)",
     async (bound) => {
       const root = await temporaryDirectory();
       const repository = join(root, "repository");
