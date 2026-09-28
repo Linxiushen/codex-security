@@ -1148,6 +1148,7 @@ try {
   for (const [name, candidate] of [
     ["candidate-id", { candidateId: "candidate-still-pending" }],
     ["historical-surface", { id: "candidate-still-pending" }],
+    ["historical-surface-slash", { id: "worker/observation" }],
     [
       "original-candidate",
       {
@@ -1177,7 +1178,7 @@ try {
         ...surfaceDraft.coverage,
         surfaces: surfaceDraft.coverage.surfaces.map((surface) => ({
           ...surface,
-          ...(name === "historical-surface"
+          ...(name.startsWith("historical-surface")
             ? { candidateId: candidate.id }
             : {}),
         })),
@@ -1209,20 +1210,30 @@ try {
     const retainedCandidate = {
       ...unresolved,
       id: candidate.candidateId ?? candidate.id,
-      ...(name === "historical-surface" ? { candidateId: candidate.id } : {}),
+      ...(name.startsWith("historical-surface")
+        ? { candidateScoped: true }
+        : {}),
     };
     assert.deepEqual(retainedCoverage.deferred, [retainedCandidate]);
-    if (name === "historical-surface") {
-      for (const association of [
+    if (name.startsWith("historical-surface")) {
+      for (const [index, association] of [
         undefined,
         undefined,
         "other-candidate",
         candidate.id,
-      ]) {
+      ].entries()) {
+        // Recovery may only retain the canonical documents. The association
+        // must survive without relying on an older checkpoint's surface row.
+        await rm(path.join(sharedSurfaceRoot, "checkpoints"), {
+          recursive: true,
+          force: true,
+        });
         await recordCodexSecurityScanDraft(sharedSurfaceContext, {
           ...resolvedSurfaceDraft,
           coverage: {
             ...resolvedSurfaceDraft.coverage,
+            completeness: index === 0 ? "partial" : "complete",
+            deferred: index === 0 ? [unresolved] : [],
             surfaces: [
               {
                 ...surfaceDraft.coverage.surfaces[0],

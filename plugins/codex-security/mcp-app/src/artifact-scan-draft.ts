@@ -248,8 +248,8 @@ async function preserveScanDraft(
     const final = sources.find((source) => source.complete !== false);
     if (final) result = structuredClone(final);
   }
-  // Older drafts used the deferred row's id as a candidate alias. Preserve that
-  // association explicitly so later surface updates cannot erase it.
+  // Older drafts used the deferred row's id as a candidate alias. Keep its
+  // scope without promoting legacy IDs into the stricter candidateId field.
   const historicalCandidateIds = new Set(
     sources.flatMap((source) =>
       (source.coverage.surfaces as JsonObject[]).flatMap((surface) =>
@@ -264,7 +264,7 @@ async function preserveScanDraft(
         typeof row.id === "string" &&
         historicalCandidateIds.has(row.id)
       )
-        row.candidateId = row.id;
+        row.candidateScoped = true;
   const resolvedSurfaces = resolvedCoverageSurfaceIds(result.coverage, sources);
   const retainedScope = sources.find(
     (source) => source.scope !== undefined,
@@ -340,6 +340,12 @@ async function preserveScanDraft(
           (item) => item.candidateId === candidateId || item.id === candidateId,
         );
         if (candidateRow) {
+          if (
+            candidateRow.candidateId === undefined &&
+            (pending.candidateScoped === true ||
+              typeof pending.candidateId === "string")
+          )
+            candidateRow.candidateScoped = true;
           for (const field of ["candidate", "finding"] as const) {
             if (pending[field] !== undefined)
               candidateRow[field] ??= structuredClone(pending[field]);
@@ -388,6 +394,7 @@ async function preserveScanDraft(
           (typeof candidateId !== "string" || !resolvedIds.has(candidateId)) &&
           !(
             typeof item.candidateId !== "string" &&
+            item.candidateScoped !== true &&
             item.candidate === undefined &&
             item.finding === undefined &&
             Array.isArray(item.surfaceIds) &&
