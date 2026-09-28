@@ -1587,17 +1587,24 @@ process.exit(1);
       childRelativeDirectory,
     );
     await mkdir(childDirectory, { recursive: true, mode: 0o700 });
-    const child = runWorkbenchFixture(runtimeLabel, environment, [
-      "register-cli-scan",
-      "--repository",
-      canceledRepo,
-      "--scan-dir",
-      childDirectory,
-      "--parent-scan-id",
-      canceledScan.scanId,
-      "--recipe-json",
-      JSON.stringify(privateScanRecipe(canceledRepo, "standard")),
-    ]);
+    const child = runWorkbenchFixture(
+      runtimeLabel,
+      environment,
+      [
+        "register-cli-scan",
+        "--repository",
+        canceledRepo,
+        "--scan-dir",
+        childDirectory,
+        "--parent-scan-id",
+        canceledScan.scanId,
+        "--registration-json-stdin",
+      ],
+      {
+        recipe: privateScanRecipe(canceledRepo, "standard"),
+        parentScanRole: "deep_pass",
+      },
+    );
     runWorkbenchFixture(
       runtimeLabel,
       environment,
