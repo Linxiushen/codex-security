@@ -535,6 +535,8 @@ test.each(
         ["absent", "unknown-child"],
         ["larger", "unknown-child"],
         ["stale", "running-child"],
+        ["absent", "failed-threadless"],
+        ["stale", "failed-threadless"],
         ["larger", "unknown-merge"],
         ["larger", "unavailable"],
         ["larger", "parent-unavailable"],
@@ -647,7 +649,8 @@ test.each(
     checkpoint.terminalReason = terminalReason;
     if (
       (saved === "absent" && accounting === "complete") ||
-      accounting === "running-child"
+      accounting === "running-child" ||
+      accounting === "failed-threadless"
     ) {
       const directory = "artifacts/deep-scan/passes/pass-2";
       await mkdir(join(f.scanDir, directory), { recursive: true, mode: 0o700 });
@@ -665,6 +668,16 @@ test.each(
         JSON.stringify({ recipe: { ...f.recipe, mode: "standard" } }),
       );
       const scanId = registration["scanId"] as string;
+      if (accounting === "failed-threadless") {
+        const unrecordedThread = randomUUID();
+        await writeUsage(
+          join(f.codexHome, "sessions", `rollout-${unrecordedThread}.jsonl`),
+          unrecordedThread,
+          join(f.scanDir, directory),
+          50_000,
+          5_000,
+        );
+      }
       if (accounting !== "running-child")
         await f.command([
           "fail-scan",
@@ -672,7 +685,12 @@ test.each(
           scanId,
           "--defer-publication",
           "--message",
-          "Synthetic failure before session startup.",
+          accounting === "failed-threadless"
+            ? "Synthetic failure after optional session persistence failed."
+            : "Synthetic failure before session startup.",
+          ...(accounting === "failed-threadless"
+            ? []
+            : ["--cost-json", JSON.stringify(cost(0, 0))]),
         ]);
       checkpoint.passes.push(
         { directory, scanId },

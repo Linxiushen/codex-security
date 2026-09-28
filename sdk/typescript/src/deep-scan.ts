@@ -200,12 +200,8 @@ export async function terminalDeepScanError(
       );
     for (const record of listed["scans"] as unknown as SavedPass[]) {
       const index = savedPassIndex(input, state, record);
-      if (index >= 0)
-        costs[index] =
-          record.cost ??
-          (record.progress.status === "failed" && !record.continuationThreadId
-            ? undefined
-            : null);
+      // Missing optional thread/cost persistence does not establish zero usage.
+      if (index >= 0) costs[index] = record.cost ?? null;
     }
     if (state.legacy) {
       costs.push(
