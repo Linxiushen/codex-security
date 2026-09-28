@@ -27,7 +27,7 @@ function compressedFiles(bytes: Buffer, split: boolean): Map<string, Buffer> {
 
 describe("npm package public contents", () => {
   test.each([false, true])(
-    "accepts clean expanded contents despite compressed marker bytes (split: %s)",
+    "accepts clean expanded contents despite compressed marker bytes (split: %p)",
     (split) => {
       expect(cleanCompressedPayload.toString("utf8")).toContain(" Go/w");
       expect(
@@ -42,7 +42,7 @@ describe("npm package public contents", () => {
   );
 
   test.each([false, true])(
-    "rejects a marker in expanded contents (split: %s)",
+    "rejects a marker in expanded contents (split: %p)",
     (split) => {
       const bytes = brotliCompressSync(
         Buffer.from("See go/synthetic-reference."),
@@ -54,7 +54,7 @@ describe("npm package public contents", () => {
   );
 
   test.each([false, true])(
-    "rejects trailing bytes after a valid Brotli stream (split: %s)",
+    "rejects trailing bytes after a valid Brotli stream (split: %p)",
     (split) => {
       const bytes = Buffer.concat([
         cleanCompressedPayload,

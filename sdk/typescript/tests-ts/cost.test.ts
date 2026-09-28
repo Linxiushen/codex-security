@@ -658,7 +658,7 @@ describe("live scan cost tracking", () => {
     expect(updates[1]).not.toHaveProperty("cacheWriteInputTokensReported");
   });
   test.each([false, true])(
-    "coalesces refresh and stop behind active I/O (failure=%s)",
+    "coalesces refresh and stop behind active I/O (failure=%p)",
     async (fail) => {
       const home = await codexHome();
       await writeSession(home, "scan-thread", {
@@ -829,7 +829,7 @@ describe("live scan cost tracking", () => {
     ["main", true],
     ["main", false],
   ] as const)(
-    "replays early worker output when the %s session arrives later (raw events: %s)",
+    "replays early worker output when the %s session arrives later (raw events: %p)",
     async (missing, rawEvents) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scan");
