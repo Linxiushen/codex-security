@@ -524,36 +524,38 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
   await writeDraft(f.command, f.registration, "deep", checkpoint.aggregate!);
 }
 
-test.each(
-  (["failed", "canceled"] as const).flatMap((terminalReason) =>
-    (
-      [
-        ["absent", "complete"],
-        ["stale", "complete"],
-        ["exact", "complete"],
-        ["larger", "complete"],
-        ["absent", "unknown-child"],
-        ["larger", "unknown-child"],
-        ["stale", "running-child"],
-        ["absent", "failed-threadless"],
-        ["stale", "failed-threadless"],
-        ["larger", "unknown-merge"],
-        ["absent", "unregistered-merge"],
-        ["stale", "unregistered-merge"],
-        ["larger", "unavailable"],
-        ["larger", "parent-unavailable"],
-        ["larger", "unknown-legacy"],
-        ["larger", "mismatched-child"],
-        ["larger", "missing-child"],
-        ["absent", "legacy-saved"],
-        ["absent", "legacy-current"],
-        ["absent", "legacy-logs"],
-      ] as const
-    ).map(
-      ([saved, accounting]) => [terminalReason, saved, accounting] as const,
-    ),
-  ),
-)(
+// Accounting is shared by both terminal states; canceled cases retain coverage
+// for recovered totals and missing optional child or merge persistence.
+test.each([
+  ...(
+    [
+      ["absent", "complete"],
+      ["stale", "complete"],
+      ["exact", "complete"],
+      ["larger", "complete"],
+      ["absent", "unknown-child"],
+      ["larger", "unknown-child"],
+      ["stale", "running-child"],
+      ["absent", "failed-threadless"],
+      ["stale", "failed-threadless"],
+      ["larger", "unknown-merge"],
+      ["absent", "unregistered-merge"],
+      ["stale", "unregistered-merge"],
+      ["larger", "unavailable"],
+      ["larger", "parent-unavailable"],
+      ["larger", "unknown-legacy"],
+      ["larger", "mismatched-child"],
+      ["larger", "missing-child"],
+      ["absent", "legacy-saved"],
+      ["absent", "legacy-current"],
+      ["absent", "legacy-logs"],
+    ] as const
+  ).map(([saved, accounting]) => ["failed", saved, accounting] as const),
+  ["canceled", "absent", "complete"],
+  ["canceled", "larger", "unknown-child"],
+  ["canceled", "stale", "failed-threadless"],
+  ["canceled", "absent", "unregistered-merge"],
+] as const)(
   "rejecting a %s checkpoint reconciles %s saved cost with %s accounting",
   async (terminalReason, saved, accounting) => {
     const cost = (input_tokens: number, output_tokens: number) =>

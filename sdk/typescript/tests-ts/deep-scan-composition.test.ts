@@ -400,7 +400,9 @@ describe("ordinary scan composition", () => {
         `saved Deep Scan is ${terminalReason}`,
       );
       await expect(execution).rejects.toBeInstanceOf(ScanInterruptedError);
-      await expect(execution).rejects.toMatchObject({ scanDir: h.input.scanDir });
+      await expect(execution).rejects.toMatchObject({
+        scanDir: h.input.scanDir,
+      });
       expect(h.calls).toEqual([]);
       expect(h.mergeInputs).toEqual([]);
       expect(h.published).toEqual([]);
