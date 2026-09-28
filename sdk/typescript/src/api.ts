@@ -14,10 +14,13 @@ import {
 } from "./execution-auth.js";
 export {
   scanAuthentication,
-  runtimeScanAuthentication,
-  selectedScanEnvironment,
   environmentValue,
   type ScanAuthentication,
+} from "./execution-auth.js";
+/** @internal */
+export {
+  runtimeScanAuthentication,
+  selectedScanEnvironment,
 } from "./execution-auth.js";
 
 import {
@@ -46,7 +49,9 @@ import {
   notifyObserver,
   throwIfAborted,
 } from "./scan-events.js";
-export { runScanEvents, classifyConnectionFailure } from "./scan-events.js";
+export { classifyConnectionFailure } from "./scan-events.js";
+/** @internal */
+export { runScanEvents } from "./scan-events.js";
 import {
   chmod,
   lstat,

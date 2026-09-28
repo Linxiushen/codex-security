@@ -309,19 +309,42 @@ process.exit(0);
   });
 
   test.each([
-    { env_key: "OPENAI_API_KEY" },
-    { auth: { type: "command", command: "synthetic-auth-provider" } },
-  ] as JsonObject[])(
-    "preserves the native provider environment at the matcher process boundary: %j",
-    async (provider) => {
+    {
+      name: "custom",
+      provider: { env_key: "OPENAI_API_KEY" },
+      ambient: false,
+    },
+    {
+      name: "custom",
+      provider: {
+        auth: { type: "command", command: "synthetic-auth-provider" },
+      },
+      ambient: false,
+    },
+    ...["openrouter", "fireworks"].flatMap((name) =>
+      [false, true].map((ambient) => ({
+        name,
+        provider: { name: "Synthetic", env_key: "SYNTHETIC_PROVIDER_KEY" },
+        ambient,
+      })),
+    ),
+  ] as { name: string; provider: JsonObject; ambient: boolean }[])(
+    "preserves the configured provider at the matcher process boundary: %j",
+    async ({ name, provider, ambient }) => {
       const home = await mkdtemp(
         join(tmpdir(), "codex-security-matcher-provider-"),
       );
       temporaryDirectories.push(home);
-      await writeFile(
-        join(home, "config.toml"),
-        'model_provider="openai"\nmodel="ambient-model"\nmodel_reasoning_effort="low"\n',
-      );
+      const providerConfig = {
+        model: "synthetic-native-model",
+        model_reasoning_effort: "ultra",
+        model_provider: name,
+        model_providers: { [name]: provider },
+      };
+      const homeConfig = ambient
+        ? stringify(providerConfig)
+        : 'model_provider="openai"\nmodel="ambient-model"\nmodel_reasoning_effort="low"\n';
+      await writeFile(join(home, "config.toml"), homeConfig);
       const captures = join(home, "launches.jsonl");
       const preload = join(home, "capture.mjs");
       await writeFile(
@@ -331,6 +354,7 @@ import { appendFileSync } from "node:fs";
 appendFileSync(${JSON.stringify(captures)}, JSON.stringify({
   openai: process.env.OPENAI_API_KEY ?? null,
   codex: process.env.CODEX_API_KEY ?? null,
+  providerKey: process.env.SYNTHETIC_PROVIDER_KEY ?? null,
   argv: process.argv.slice(1),
 }) + "\\n");
 await new Promise((resolve) => { process.stdin.resume(); process.stdin.on("end", resolve); });
@@ -353,9 +377,11 @@ process.exit(0);
         TEMP: process.env["TEMP"],
         TMP: process.env["TMP"],
         CODEX_HOME: home,
-        CODEX_SECURITY_SCAN_ID: "synthetic-parent",
-        OPENAI_API_KEY: "synthetic-provider-key",
-        CODEX_API_KEY: "synthetic-native-key",
+        OPENAI_API_KEY:
+          name === "custom" ? "synthetic-provider-key" : undefined,
+        CODEX_API_KEY: name === "custom" ? "synthetic-native-key" : undefined,
+        SYNTHETIC_PROVIDER_KEY:
+          name === "custom" ? undefined : "synthetic-custom-provider-key",
       };
       const originalStartThread = Codex.prototype.startThread;
       const startThread = spyOn(
@@ -381,14 +407,7 @@ process.exit(0);
             { before: [finding("before")], after: [finding("after")] },
             {
               environment,
-              config: {
-                codexOverrides: {
-                  model: "synthetic-native-model",
-                  model_reasoning_effort: "ultra",
-                  model_provider: "custom",
-                  model_providers: { custom: provider },
-                },
-              },
+              config: ambient ? undefined : { codexOverrides: providerConfig },
               workingDirectory: home,
               preserveProviderEnvironment,
             },
@@ -398,12 +417,28 @@ process.exit(0);
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line));
-        expect(native.openai).toBe("synthetic-provider-key");
-        expect(native.codex).toBe("synthetic-native-key");
-        expect(native.argv).toContain('model_provider="custom"');
-        expect(native.argv).toContain('model="synthetic-native-model"');
-        expect(native.argv).toContain('model_reasoning_effort="ultra"');
-        if ("auth" in provider) {
+        if (!ambient) {
+          expect(native.argv).toContain(`model_provider="${name}"`);
+          expect(native.argv).toContain('model="synthetic-native-model"');
+          expect(native.argv).toContain('model_reasoning_effort="ultra"');
+          if (provider["env_key"] !== undefined) {
+            expect(native.argv).toContain(
+              `model_providers.${name}.env_key="${provider["env_key"]}"`,
+            );
+          }
+        }
+        for (const capture of [native, ordinary]) {
+          expect(capture.argv).toContain("read-only");
+          expect(capture.argv).toContain("features.shell_tool=false");
+          expect(capture.argv).toContain("features.plugins=false");
+        }
+        if (name !== "custom") {
+          for (const capture of [native, ordinary]) {
+            expect(capture.providerKey).toBe("synthetic-custom-provider-key");
+            expect(capture.openai).toBeNull();
+            expect(capture.codex).toBeNull();
+          }
+        } else if ("auth" in provider) {
           expect(ordinary.openai).toBeNull();
           expect(ordinary.codex).toBeNull();
           const override = native.argv.find((value: string) =>
@@ -420,8 +455,19 @@ process.exit(0);
           expect(ordinary.openai).toBe("synthetic-provider-key");
           expect(ordinary.codex).toBe("synthetic-provider-key");
         }
-        expect(environment.OPENAI_API_KEY).toBe("synthetic-provider-key");
-        expect(environment.CODEX_API_KEY).toBe("synthetic-native-key");
+        if (name === "custom") {
+          expect(native.openai).toBe("synthetic-provider-key");
+          expect(native.codex).toBe("synthetic-native-key");
+          expect(environment.OPENAI_API_KEY).toBe("synthetic-provider-key");
+          expect(environment.CODEX_API_KEY).toBe("synthetic-native-key");
+        } else {
+          expect(environment.SYNTHETIC_PROVIDER_KEY).toBe(
+            "synthetic-custom-provider-key",
+          );
+        }
+        expect(await readFile(join(home, "config.toml"), "utf8")).toBe(
+          homeConfig,
+        );
       } finally {
         startThread.mockRestore();
       }

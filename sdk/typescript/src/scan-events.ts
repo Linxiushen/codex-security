@@ -88,6 +88,7 @@ export async function runScanEvents(
     throw error;
   }
 }
+/** @internal */
 export async function runScanTurn(
   options: ScanEventRunOptions,
 ): Promise<CompletedScanTurn> {
@@ -224,6 +225,7 @@ export async function runScanTurn(
   }
 }
 
+/** @internal */
 export async function readCodexTurn(options: {
   thread: CodexThreadLike;
   events: AsyncGenerator<ScanEvent>;

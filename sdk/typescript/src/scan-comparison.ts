@@ -27,11 +27,7 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { definedEnvironment } from "./execution-auth.js";
-import {
-  prepareExecutionSource,
-  prepareReadOnlyExecution,
-} from "./execution-preparation.js";
+import { prepareReadOnlyExecution } from "./execution-preparation.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import {
   compactFinding,
@@ -609,16 +605,6 @@ async function startReadOnlyCodexThread(
       : undefined;
   const command =
     environment === undefined ? undefined : resolveCodexCommand(environment);
-  const execution =
-    command === undefined
-      ? undefined
-      : prepareExecutionSource({
-          command,
-          configuration: providerConfig,
-          environment: environment!,
-          auth: options.auth,
-          preserveProviderEnvironment: options.preserveProviderEnvironment,
-        });
   const codex =
     options.codex ??
     (await (options.createCodex ?? ((settings) => new Codex(settings)))({
@@ -626,12 +612,14 @@ async function startReadOnlyCodexThread(
         ? {}
         : {
             codexPathOverride: executablePathForSpawn(command.command),
-            env: definedEnvironment(execution!.environment),
+            // Helpers retain the provider credentials selected by comparisonEnvironment.
+            env: environment,
             // The SDK forwards apiKey as CODEX_API_KEY for Codex exec.
-            apiKey:
-              execution!.externalProvider === null
-                ? (execution!.apiKey ?? undefined)
-                : undefined,
+            apiKey: options.preserveProviderEnvironment
+              ? undefined
+              : environmentEntry(environment!, "OPENAI_API_KEY")?.trim() ||
+                environmentEntry(environment!, "CODEX_API_KEY")?.trim() ||
+                undefined,
           }),
       ...(configOverrides.length === 0 ? {} : { configOverrides }),
       config: {
