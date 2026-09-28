@@ -4710,6 +4710,9 @@ describe("CodexSecurity orchestration", () => {
           prepareOutputDir: async () => scanDir,
           repositoryRevision: async () => "deadbeef",
           prepareScanArtifactRestorer: async () => ({
+            async projectChild() {
+              throw new Error("Standard scans do not project child results.");
+            },
             async prepareDirectory() {},
             async remove() {},
             restore: async (name, contents) => {

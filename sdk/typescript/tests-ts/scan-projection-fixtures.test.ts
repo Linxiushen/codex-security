@@ -366,3 +366,37 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test.each([false, true])(
+  "does not overwrite a projected report with colliding evidence (uppercase: %p)",
+  async (uppercase) => {
+    const h = await canonicalChild();
+    const base = `${fixture.sourceScanId}-check-3`;
+    const name = uppercase ? `${base}.md`.toUpperCase() : `${base}.md`;
+    await writeFile(
+      join(h.source, "findings/check-3", name),
+      "Supporting evidence",
+    );
+    const writer = await prepareScanArtifactRestorer(h.options, h.parent);
+    const projected = await writer.projectChild(
+      fixture.parentScanId,
+      fixture.sourceScanId,
+      h.source,
+    );
+    const reportPath = `findings/${base}-2/${base}-2.md`;
+    expect(
+      projected.draft.findings.some(
+        (finding) => finding.writeup?.reportPath === reportPath,
+      ),
+    ).toBe(true);
+    expect(await readFile(join(h.parent, reportPath))).toEqual(
+      await readFile(join(h.source, "findings/check-3/check-3.md")),
+    );
+    expect(
+      await readFile(join(h.parent, `findings/${base}-2/${name}`), "utf8"),
+    ).toBe("Supporting evidence");
+    expect(
+      await readFile(join(h.source, "findings/check-3", name), "utf8"),
+    ).toBe("Supporting evidence");
+  },
+);

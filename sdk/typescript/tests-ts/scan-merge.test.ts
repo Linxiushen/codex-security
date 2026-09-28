@@ -664,47 +664,6 @@ test("requires justification for changed or conflicting severity", () => {
   ).toEqual({ level: "high" });
 });
 
-test.each(["child-issue.md", "CHILD-ISSUE.MD"])(
-  "does not overwrite a projected report with %s evidence",
-  async (name) => {
-    const directory = await mkdtemp(join(tmpdir(), "scan-report-collision-"));
-    directories.push(directory);
-    await mkdir(join(directory, "findings/issue"), { recursive: true });
-    await writeFile(
-      join(directory, "findings/issue/issue.md"),
-      "Original report",
-    );
-    await writeFile(
-      join(directory, "findings/issue", name),
-      "Supporting evidence",
-    );
-    const input = child("child", [
-      finding("issue", { writeup: { reportPath: "findings/issue/issue.md" } }),
-    ]);
-    input.scanDir = directory;
-    const writes = new Map<string, Uint8Array>();
-    const projected = await projectScanMergeWriteups(input, {
-      async restore(path, bytes) {
-        writes.set(path, bytes);
-      },
-    });
-    expect(projected.draft.findings[0]!["writeup"]).toEqual({
-      reportPath: "findings/child-issue-2/child-issue-2.md",
-    });
-    expect(
-      Buffer.from(
-        writes.get("findings/child-issue-2/child-issue-2.md")!,
-      ).toString(),
-    ).toBe("Original report");
-    expect(
-      Buffer.from(writes.get(`findings/child-issue-2/${name}`)!).toString(),
-    ).toBe("Supporting evidence");
-    expect(
-      await readFile(join(directory, "findings/issue", name), "utf8"),
-    ).toBe("Supporting evidence");
-  },
-);
-
 test("compact merge inputs preserve complete indexed Unicode and oversized lineage", () => {
   const original = finding("large", {
     remediation: "Preserve the distinct tail repair Ω.",

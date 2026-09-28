@@ -364,7 +364,7 @@ export async function runDeepScans(
     if (!pending.length) {
       state.aggregate = {
         ...validateMerge({ scanId, findings: [] }, [], null).aggregate,
-        coverage: combineScanCoverage([], scanDir, [], state.legacy?.coverage),
+        coverage: combineScanCoverage([], [], state.legacy?.coverage),
       };
       await save();
       return;
