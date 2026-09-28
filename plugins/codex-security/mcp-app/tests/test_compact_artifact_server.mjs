@@ -1503,10 +1503,6 @@ process.exit(1);
       handoffClaimToken,
     ]);
     assert.equal(completed.scan.progress.status, "complete");
-    if (completed.scan.usage !== undefined)
-      expectedResult.usage = completed.scan.usage;
-    if (completed.scan.cost !== undefined)
-      expectedResult.cost = completed.scan.cost;
     const originalDraft = await snapshotScanDraft(scanDir);
 
     for (let repeat = 0; repeat < 2; repeat += 1) {
