@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   chmod,
@@ -20,7 +21,10 @@ import {
   prepareScanArtifactRestorer,
   runCodexCommand,
 } from "../src/runtime.js";
-import { combineScanCoverage } from "../src/scan-merge.js";
+import {
+  combineScanCoverage,
+  createScanMergeValidator,
+} from "../src/scan-merge.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 
 const python =
@@ -158,6 +162,58 @@ test("completed projection follows the shared canonical child fixture", async ()
     h.source,
   );
   expect(await readFile(join(h.parent, evidence[0]))).toEqual(replacement);
+});
+
+test("normalizes sealed legacy findings for merging while retaining exact source evidence", async () => {
+  const h = await canonicalChild();
+  const first = fixture.expected.sourceFindingIndexes[0]!;
+  const legacy = {
+    ...h.original,
+    findings: h.original.findings.map((finding, index) =>
+      index === first
+        ? {
+            ...finding,
+            attackPath: {
+              steps: { first: "upload" },
+              preconditions: "An attacker can submit an archive.",
+            },
+          }
+        : finding,
+    ),
+  };
+  const sourceBytes = JSON.stringify(legacy);
+  const findingsPath = join(h.source, "findings.json");
+  await writeFile(findingsPath, sourceBytes);
+  const manifestPath = join(h.source, "scan-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    scan: { artifacts: Array<{ path: string; sha256: string }> };
+  };
+  manifest.scan.artifacts.find(
+    (artifact) => artifact.path === "findings.json",
+  )!.sha256 = createHash("sha256").update(sourceBytes).digest("hex");
+  await writeFile(manifestPath, JSON.stringify(manifest));
+
+  const writer = await prepareScanArtifactRestorer(h.options, h.parent);
+  const projected = await writer.projectChild(
+    fixture.parentScanId,
+    fixture.sourceScanId,
+    h.source,
+  );
+  expect(projected.draft.findings[0]!.attackPath).toEqual({
+    preconditions: ["An attacker can submit an archive."],
+  });
+  expect(projected.sourceFindings).toEqual(
+    fixture.expected.sourceFindingIndexes.map(
+      (index) => legacy.findings[index]!,
+    ),
+  );
+  const merge = await createScanMergeValidator(PLUGIN_ROOT);
+  const { coverage: _coverage, ...draft } = projected.draft;
+  const result = merge(draft, [projected], null);
+  expect(result.aggregate.findings[0]!.provenance.sourceFindings).toEqual([
+    { id: `${fixture.sourceScanId}:0`, finding: legacy.findings[first]! },
+  ]);
+  expect(await readFile(findingsPath, "utf8")).toBe(sourceBytes);
 });
 
 test.each(["source ID", "seal", "parent directory"])(

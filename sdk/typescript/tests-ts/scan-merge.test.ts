@@ -3,8 +3,10 @@ import type {
   SemanticCoverage,
 } from "../src/semantic-models.js";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, test } from "bun:test";
+import { build } from "esbuild";
 import {
   combineScanCoverage,
   createScanMergeValidator,
@@ -427,6 +429,44 @@ describe("local scan merging", () => {
     expect(combineScanCoverage([], ["No scan completed."]).completeness).toBe(
       "partial",
     );
+  });
+
+  test("combines large coverage and unresolved lists on Node without argument limits", async () => {
+    // Bun accepts more function arguments than supported Node runtimes do.
+    const bundled = await build({
+      stdin: {
+        resolveDir: fileURLToPath(new URL("../src/", import.meta.url)),
+        contents: `
+import assert from "node:assert/strict";
+import { combineScanCoverage } from "./scan-merge.ts";
+const count = 150_000;
+const coverage = {
+  completeness: "complete",
+  surfaces: Array.from({ length: count }, (_, index) => ({
+    id: "child/surface-" + index, label: "Surface " + index, disposition: "no_issue_found",
+  })),
+  explicitExclusions: [],
+  deferred: Array.from({ length: count }, (_, index) => ({ reason: "Deferred " + index })),
+};
+const unresolved = Array.from({ length: count }, (_, index) => "Unresolved " + index);
+const combined = combineScanCoverage([{ draft: { coverage } }], unresolved);
+assert.equal(combined.completeness, "partial");
+assert.deepEqual(combined.surfaces, coverage.surfaces);
+assert.deepEqual(combined.deferred.slice(0, count), coverage.deferred);
+assert.deepEqual(combined.deferred.slice(count), unresolved.map(reason => ({ reason })));
+combined.surfaces[0].label = "Changed";
+assert.equal(coverage.surfaces[0].label, "Surface 0");
+`,
+      },
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      write: false,
+    });
+    execFileSync("node", ["--input-type=commonjs"], {
+      input: bundled.outputFiles[0]!.text,
+      encoding: "utf8",
+    });
   });
 
   test("retains saved parent coverage without rebasing its identities or receipts", () => {

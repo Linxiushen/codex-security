@@ -20,6 +20,7 @@ from typing import Any, TypedDict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from finalize_scan_contract import (
     ContractError,
+    _legacy_sealed_findings_for_validation,
     _prepare_scan_finalization,
     open_scan_local_file_descriptor,
     scan_root_identity,
@@ -85,7 +86,8 @@ def project_scan_artifacts(
             )
         ]
     )
-    projected = copy.deepcopy(originals)
+    # Merge the compatible view while retaining the exact sealed originals as provenance.
+    projected = _legacy_sealed_findings_for_validation({"findings": originals})["findings"]
     report_slugs: dict[str, str] = {}
     reserved_slugs = {
         _collision_key(f"{source_scan_id}-{Path(finding['writeup']['reportPath']).parent.name}")
@@ -104,17 +106,19 @@ def project_scan_artifacts(
         write_scan_local_bytes(parent_directory, relative, payload, expected_root_identity=identity)
 
     def copy_evidence(directory: Path, report: Path, slug: str) -> None:
-        with os.scandir(directory) as entries:
-            for entry in entries:
-                path = Path(entry.path)
-                if entry.is_dir(follow_symlinks=False):
-                    copy_evidence(path, report, slug)
-                elif path != source_directory / report:
-                    relative = path.relative_to(source_directory)
-                    destination = (
-                        f"findings/{slug}/{relative.relative_to(report.parent).as_posix()}"
-                    )
-                    write(destination, read(relative.as_posix()))
+        directories = [directory]
+        while directories:
+            with os.scandir(directories.pop()) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        directories.append(path)
+                    elif path != source_directory / report:
+                        relative = path.relative_to(source_directory)
+                        destination = (
+                            f"findings/{slug}/{relative.relative_to(report.parent).as_posix()}"
+                        )
+                        write(destination, read(relative.as_posix()))
 
     for index, finding in enumerate(projected):
         for field in ("findingId", "occurrenceId", "fingerprints"):

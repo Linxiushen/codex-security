@@ -50,7 +50,9 @@ def projection_fixture(tmp_path):
     return state, parent_dir, parent, child_dir, child, fixture
 
 
-def completed_projection(parent_dir, parent, child_dir, child, **overrides):
+def completed_projection(
+    parent_dir, parent, child_dir, child, *, descriptor_limit=None, **overrides
+):
     identity = parent_dir.stat()
     request = {
         "parentScanId": parent["scanId"],
@@ -60,15 +62,22 @@ def completed_projection(parent_dir, parent, child_dir, child, **overrides):
         "expectedParentIdentity": {"dev": str(identity.st_dev), "ino": str(identity.st_ino)},
         **overrides,
     }
+    command = [sys.executable, "-I", "-X", "utf8", "-B"]
+    if descriptor_limit is not None:
+        command.extend(
+            [
+                "-c",
+                (
+                    "import resource, runpy, sys; "
+                    f"resource.setrlimit(resource.RLIMIT_NOFILE, ({descriptor_limit}, "
+                    "resource.getrlimit(resource.RLIMIT_NOFILE)[1])); "
+                    "runpy.run_path(sys.argv.pop(), run_name='__main__')"
+                ),
+            ]
+        )
+    command.append(str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"))
     return subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-X",
-            "utf8",
-            "-B",
-            str(Path(__file__).parents[1] / "scripts/project_scan_artifacts.py"),
-        ],
+        command,
         input=json.dumps(request),
         capture_output=True,
         text=True,
@@ -159,6 +168,55 @@ def test_completed_projection_rejects_symlink_evidence(projection_fixture, direc
     assert completed.returncode != 0
     assert "inside the scan directory" in completed.stderr
     assert not list((parent_dir / "findings").glob("*/unsafe.txt"))
+
+
+@pytest.mark.parametrize(
+    "depth, descriptor_limit",
+    [
+        pytest.param(
+            260,
+            256,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="POSIX descriptor limit"),
+        ),
+        pytest.param(
+            1050,
+            None,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux", reason="Evidence path exceeds other platforms' limits"
+            ),
+        ),
+    ],
+)
+def test_completed_projection_copies_deep_evidence(projection_fixture, depth, descriptor_limit):
+    _, parent_dir, parent, child_dir, child, fixture = projection_fixture
+    source = child_dir / "findings/check"
+    destination = parent_dir / f"findings/{child['scanId']}-check-4"
+    components = ["d"] * depth
+    source_leaf = source.joinpath(*components, "evidence.bin")
+    destination_leaf = destination.joinpath(*components, "evidence.bin")
+    try:
+        directory = source
+        for component in components:
+            directory /= component
+            directory.mkdir()
+        source_leaf.write_bytes(b"\x00\xffSynthetic nested evidence")
+        completed = completed_projection(
+            parent_dir, parent, child_dir, child, descriptor_limit=descriptor_limit
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert destination_leaf.read_bytes() == source_leaf.read_bytes()
+        assert len(json.loads(completed.stdout)["draft"]["findings"]) == len(
+            fixture["expected"]["sourceFindingIndexes"]
+        )
+    finally:
+        # Do not make test teardown depend on a recursive directory remover either.
+        for leaf, root in ((source_leaf, source), (destination_leaf, destination)):
+            leaf.unlink(missing_ok=True)
+            directory = leaf.parent
+            while directory != root:
+                if directory.exists():
+                    directory.rmdir()
+                directory = directory.parent
 
 
 @pytest.mark.parametrize("terminal", ["unsealed", "interrupted"])

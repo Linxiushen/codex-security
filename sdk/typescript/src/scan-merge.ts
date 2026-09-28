@@ -365,14 +365,15 @@ export function combineScanCoverage(
   ): void => {
     const records: unknown[] = structuredClone(priorCoverage?.[field] ?? []);
     for (const input of inputs)
-      records.push(...structuredClone(input.draft.coverage[field] ?? []));
+      for (const record of structuredClone(input.draft.coverage[field] ?? []))
+        records.push(record);
     coverage[field] = exactUnion(records) as SemanticCoverage[Field];
   };
   combineField("surfaces");
   combineField("explicitExclusions");
   combineField("deferred");
   combineField("openQuestions");
-  coverage.deferred.push(...unresolved.map((reason) => ({ reason })));
+  for (const reason of unresolved) coverage.deferred.push({ reason });
   return coverage;
 }
 
