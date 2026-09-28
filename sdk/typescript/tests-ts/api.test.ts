@@ -78,6 +78,7 @@ import {
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import { FindingWorkflow } from "../src/finding-workflow.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
+import { readKnowledgeBaseSnapshot } from "../src/knowledge-base.js";
 
 type ScanObserverName = Parameters<
   NonNullable<ScanOptions["onObserverError"]>
@@ -5242,7 +5243,7 @@ describe("CodexSecurity orchestration", () => {
     await client.close();
   });
 
-  test.each(["repository", "standalone-file"])(
+  test.each(["repository", "standalone-file", "snapshot"])(
     "protects %s knowledge-base context without retaining its documents",
     async (kind) => {
       const scanPrompt = "Review the synthetic authorization boundary.";
@@ -5268,7 +5269,7 @@ describe("CodexSecurity orchestration", () => {
         join(trustedBin, process.platform === "win32" ? "git.exe" : "git"),
       );
       const expectedGit =
-        kind === "repository"
+        kind !== "standalone-file"
           ? join(await realpath(dirname(trustedGit)), basename(trustedGit))
           : join(trustedBin, process.platform === "win32" ? "git.exe" : "git");
       const context =
@@ -5276,12 +5277,20 @@ describe("CodexSecurity orchestration", () => {
       await mkdir(join(repository, ".git"), { recursive: true });
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
-      if (kind === "repository")
+      if (kind !== "standalone-file")
         await mkdir(join(knowledgeRoot, ".git"), { recursive: true });
       await mkdir(knowledgeBaseBin, { recursive: true });
       await writeFile(document, context);
       if (process.platform !== "win32") await chmod(document, 0o700);
       await symlink(document, knowledgeBaseGit);
+      const snapshot =
+        kind === "snapshot"
+          ? await readKnowledgeBaseSnapshot([knowledgeBase])
+          : undefined;
+      if (snapshot) {
+        await rm(document);
+        await rm(join(knowledgeRoot, ".git"), { recursive: true });
+      }
       let knowledgeDirectory = "";
       let workbenchGit = "";
       let prompt = "";
@@ -5351,6 +5360,7 @@ describe("CodexSecurity orchestration", () => {
       await expect(
         client.run(repository, {
           knowledgeBasePaths: [knowledgeBase],
+          knowledgeBaseSnapshot: snapshot,
           scanPrompt,
         }),
       ).resolves.toMatchObject({ threadId: "thread-1" });

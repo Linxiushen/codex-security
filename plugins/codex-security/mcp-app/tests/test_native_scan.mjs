@@ -554,7 +554,7 @@ test("native scans preserve selected Codex homes and saved settings", async () =
 });
 
 test(
-  "native blank Codex homes reach fresh and resumed SDK children",
+  "native blank config overrides reach fresh and resumed SDK children",
   {
     skip:
       process.platform === "win32"
@@ -566,6 +566,7 @@ test(
       await mkdtemp(join(tmpdir(), "native-blank-home-")),
     );
     const home = join(root, ".codex");
+    const deepConfig = join(root, "selected-deep.toml");
     const repository = join(root, "repository");
     const pluginRoot = join(root, "plugin");
     const executable = join(root, "codex");
@@ -585,7 +586,7 @@ test(
     );
     try {
       await Promise.all([
-        mkdir(home),
+        mkdir(join(home, "codex-security"), { recursive: true }),
         mkdir(repository),
         mkdir(join(pluginRoot, ".codex-plugin"), { recursive: true }),
       ]);
@@ -593,6 +594,11 @@ test(
         join(home, "config.toml"),
         'model = "synthetic-current"\n',
       );
+      await writeFile(
+        join(home, "codex-security/config.toml"),
+        "[deep_scan]\nworkers = 2\nsubagents = 1\n",
+      );
+      await writeFile(deepConfig, "[deep_scan]\nworkers = 3\nsubagents = 2\n");
       await writeFile(
         join(pluginRoot, ".codex-plugin/plugin.json"),
         JSON.stringify({ name: "codex-security", version: "0.0.0" }),
@@ -621,56 +627,81 @@ if (process.argv.includes("app-server")) {
       });
       delete process.env.OPENAI_API_KEY;
       delete process.env.CODEX_SECURITY_CONFIG_PATH;
-      delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
-      for (const resumed of [false, true]) {
-        const prepared = await prepareNativeScan({
-          ...input(),
-          pluginRoot,
-          model: "synthetic-current",
-          reasoningEffort: "ultra",
-          recipe: {
-            auth: "api-key",
-            ...(resumed ? { config: { model: "synthetic-saved" } } : {}),
-          },
-        });
-        const runtime = await prepared.client.dependencies.prepareRuntime({});
-        try {
-          const sdk = prepared.client.dependencies.createCodex({
-            codexPathOverride: executable,
-            config: scanRuntimeCodexConfig(
-              prepared.client.config.codexOverrides,
-              repository,
-              prepared.client.dependencies.inheritedPermissions,
-            ),
-            env: runtime.environment,
+      for (const [override, workers, subagents] of [
+        [undefined, 2, 1],
+        ["", 2, 1],
+        [" \t\n", 2, 1],
+        [` ${deepConfig} `, 3, 2],
+      ]) {
+        if (override === undefined)
+          delete process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH;
+        else process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH = override;
+        for (const resumed of [false, true]) {
+          const prepared = await prepareNativeScan({
+            ...input(),
+            pluginRoot,
+            model: "synthetic-current",
+            reasoningEffort: "ultra",
+            recipe: {
+              auth: "api-key",
+              ...(resumed
+                ? {
+                    config: { model: "synthetic-saved" },
+                    deepScan: { workers: 6, subagents: 4 },
+                  }
+                : {}),
+            },
           });
-          const options = {
-            workingDirectory: repository,
-            skipGitRepoCheck: true,
-            approvalPolicy: "never",
-          };
-          const thread = resumed
-            ? sdk.resumeThread("synthetic-home-thread", options)
-            : sdk.startThread(options);
-          const events = await collectNativeEvents(
-            thread,
-            "Synthetic home selection only.",
-          );
-          assert.equal(events.at(-1).type, "turn.completed");
-          const observed = JSON.parse(await readFile(capture, "utf8"));
-          assert.equal(observed.home, await realpath(home));
-          assert.equal(observed.argv.includes("resume"), resumed);
-          assert.ok(
-            observed.argv.includes(
-              `model=${JSON.stringify(resumed ? "synthetic-saved" : "synthetic-current")}`,
-            ),
-          );
-          assert.equal(process.env.CODEX_HOME, " \t\n");
-        } finally {
-          await rm(runtime.bootstrapWorkspace, {
-            recursive: true,
-            force: true,
-          });
+          assert.equal(prepared.options.workers, resumed ? 6 : workers);
+          const runtime = await prepared.client.dependencies.prepareRuntime({});
+          try {
+            const sdk = prepared.client.dependencies.createCodex({
+              codexPathOverride: executable,
+              config: scanRuntimeCodexConfig(
+                prepared.client.config.codexOverrides,
+                repository,
+                prepared.client.dependencies.inheritedPermissions,
+              ),
+              env: runtime.environment,
+            });
+            const options = {
+              workingDirectory: repository,
+              skipGitRepoCheck: true,
+              approvalPolicy: "never",
+            };
+            const thread = resumed
+              ? sdk.resumeThread("synthetic-home-thread", options)
+              : sdk.startThread(options);
+            const events = await collectNativeEvents(
+              thread,
+              "Synthetic home selection only.",
+            );
+            assert.equal(events.at(-1).type, "turn.completed");
+            const observed = JSON.parse(await readFile(capture, "utf8"));
+            assert.equal(observed.home, await realpath(home));
+            assert.equal(observed.argv.includes("resume"), resumed);
+            assert.equal(
+              parseToml(
+                observed.argv.find((arg) => arg.startsWith("features=")),
+              ).features.multi_agent_v2.max_concurrent_threads_per_session,
+              (resumed ? 4 : subagents) + 1,
+            );
+            assert.ok(
+              observed.argv.includes(
+                `model=${JSON.stringify(resumed ? "synthetic-saved" : "synthetic-current")}`,
+              ),
+            );
+            assert.equal(process.env.CODEX_HOME, " \t\n");
+            assert.equal(
+              process.env.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH,
+              override,
+            );
+          } finally {
+            await rm(runtime.bootstrapWorkspace, {
+              recursive: true,
+              force: true,
+            });
+          }
         }
       }
     } finally {

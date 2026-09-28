@@ -178,7 +178,7 @@ export async function prepareNativeScan(
   });
   const deep = await resolveDeepScanConfig(
     options,
-    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH ??
+    environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH?.trim() ||
       join(
         environment.CODEX_HOME || configuredCodexHome(environment),
         "codex-security",

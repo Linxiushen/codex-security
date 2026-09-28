@@ -8,6 +8,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -123,7 +124,13 @@ test.each([
     usage: "missing-child",
   },
   { workers: 1, budget: false, emptyDeadline: true, lostCompletion: true },
-  { workers: 1, budget: false, knowledge: true },
+  ...[
+    "changed",
+    "renamed-file",
+    "removed-file",
+    "renamed-directory",
+    "removed-directory",
+  ].map((knowledge) => ({ workers: 1, budget: false, knowledge })),
   { workers: 1, budget: false, provider: undefined },
   { workers: 2, budget: false, provider: undefined },
   { workers: 1, budget: true, provider: undefined },
@@ -171,7 +178,12 @@ test.each([
   logFailure?: boolean;
   emptyDeadline?: boolean;
   lostCompletion?: boolean;
-  knowledge?: boolean;
+  knowledge?:
+    | "changed"
+    | "renamed-file"
+    | "removed-file"
+    | "renamed-directory"
+    | "removed-directory";
   measuredChild?: boolean;
   userCancel?: boolean;
 }[])(
@@ -203,8 +215,16 @@ test.each([
     const repo = join(root, "repo");
     const codexHome = join(root, "codex");
     let scanDir = join(root, "scan");
-    const knowledgePath = join(root, "policy.md");
-    if (knowledge) await writeFile(knowledgePath, "Original policy.");
+    const knowledgeDirectory = knowledge?.endsWith("directory");
+    const knowledgePath = join(
+      root,
+      knowledgeDirectory ? "knowledge" : "policy.md",
+    );
+    const knowledgeDocument = knowledgeDirectory
+      ? join(knowledgePath, "policy.md")
+      : knowledgePath;
+    if (knowledgeDirectory) await mkdir(knowledgePath);
+    if (knowledge) await writeFile(knowledgeDocument, "Original policy.");
     await Promise.all([mkdir(repo), mkdir(codexHome)]);
     await Promise.all(
       ["app.py", "routes.py", "models.py", "helpers.py"].map((name) =>
@@ -529,8 +549,13 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
                 recipe: JSON.parse(input!).recipe,
               });
               workbenches.set(scanId, options);
-              if (knowledge && JSON.parse(input!).recipe.mode === "deep")
-                await writeFile(knowledgePath, "Changed policy.");
+              if (knowledge && JSON.parse(input!).recipe.mode === "deep") {
+                if (knowledge.startsWith("renamed"))
+                  await rename(knowledgePath, `${knowledgePath}.moved`);
+                else if (knowledge.startsWith("removed"))
+                  await rm(knowledgePath, { recursive: true });
+                else await writeFile(knowledgeDocument, "Changed policy.");
+              }
               if (emptyDeadline && JSON.parse(input!).recipe.mode === "deep")
                 result["startedAt"] = "2020-01-01T00:00:00Z";
               if (measuredChild && JSON.parse(input!).recipe.mode === "deep") {
@@ -1196,6 +1221,8 @@ run_workbench(state, 'set-finding-triage', '--occurrence-id', completed['finding
         const manifest = await readFile(join(scanDir, "scan-manifest.json"));
         controller = new AbortController();
         scanOptions.resumeScanId = scanId;
+        if (knowledgeDirectory) await mkdir(knowledgePath);
+        await writeFile(knowledgeDocument, "Changed policy.");
         await expect(run()).rejects.toThrow("knowledge base changed");
         expect(turns).toHaveLength(count);
         expect(await readFile(join(scanDir, "scan-manifest.json"))).toEqual(

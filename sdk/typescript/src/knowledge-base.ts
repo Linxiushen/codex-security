@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { expandHome } from "./runtime.js";
+import { gitMarkerRoot } from "./targets.js";
 
 const DOCUMENT_EXTENSIONS = new Set([
   ".md",
@@ -33,6 +34,7 @@ export interface PreparedKnowledgeBase {
 export interface KnowledgeBaseSnapshot {
   readonly sources: readonly string[];
   readonly documents: Readonly<Record<string, string>>;
+  readonly protectedRoots: readonly string[];
 }
 
 /** @internal Extract once so campaign identity and workers use identical inputs. */
@@ -42,6 +44,7 @@ export async function readKnowledgeBaseSnapshot(
 ): Promise<KnowledgeBaseSnapshot> {
   const sources = new Set<string>();
   const documents = new Set<string>();
+  const protectedRoots = new Set<string>();
 
   for (const requested of paths) {
     signal?.throwIfAborted();
@@ -59,6 +62,9 @@ export async function readKnowledgeBaseSnapshot(
     }
 
     const source = await realpath(path);
+    protectedRoots.add(
+      (await gitMarkerRoot(source, signal, "outermost")) ?? source,
+    );
     const selected = metadata.isDirectory()
       ? (await discover(source, signal)).sort()
       : [source];
@@ -106,6 +112,7 @@ export async function readKnowledgeBaseSnapshot(
   return Object.freeze({
     sources: Object.freeze([...sources]),
     documents: Object.freeze(extracted),
+    protectedRoots: Object.freeze([...protectedRoots]),
   });
 }
 
@@ -138,7 +145,15 @@ export async function prepareKnowledgeBase(
     path,
     sources: [...snapshot.sources],
     snapshot,
-    sha256: createHash("sha256").update(JSON.stringify(snapshot)).digest("hex"),
+    // Keep the persisted document identity independent of execution metadata.
+    sha256: createHash("sha256")
+      .update(
+        JSON.stringify({
+          sources: snapshot.sources,
+          documents: snapshot.documents,
+        }),
+      )
+      .digest("hex"),
     cleanup: () => rm(path, { recursive: true, force: true }),
   };
 }

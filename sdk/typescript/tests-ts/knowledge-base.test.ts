@@ -11,6 +11,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import * as filesystem from "node:fs/promises";
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -37,6 +38,16 @@ test("ordinary passes share immutable extracted inputs while resume detects docu
   const changed = await prepareKnowledgeBase([source]);
   try {
     expect(first.sha256).toBe(second.sha256);
+    expect(first.sha256).toBe(
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            sources: [source],
+            documents: { "0-policy.md.txt": "Original policy." },
+          }),
+        )
+        .digest("hex"),
+    );
     expect(changed.sha256).not.toBe(first.sha256);
     for (const prepared of [first, second]) {
       const [document] = await readdir(prepared.path);
