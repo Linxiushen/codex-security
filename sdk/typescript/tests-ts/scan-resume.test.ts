@@ -538,6 +538,8 @@ test.each(
         ["absent", "failed-threadless"],
         ["stale", "failed-threadless"],
         ["larger", "unknown-merge"],
+        ["absent", "unregistered-merge"],
+        ["stale", "unregistered-merge"],
         ["larger", "unavailable"],
         ["larger", "parent-unavailable"],
         ["larger", "unknown-legacy"],
@@ -582,9 +584,14 @@ test.each(
       accounting === "complete" || (legacy && accounting !== "unknown-legacy");
     const expectedCost =
       complete && saved !== "larger" ? recoveredCost : savedCost;
-    const f = await interruptedScan("deep", false, {}, false, true, {
-      cost: childCost,
-    });
+    const f = await interruptedScan(
+      "deep",
+      false,
+      {},
+      false,
+      accounting !== "unregistered-merge",
+      { cost: childCost },
+    );
     // Give independent child and merge sessions overlapping lifetimes. Merge
     // accounting must not include the child a second time through its directory.
     const writeUsage = async (

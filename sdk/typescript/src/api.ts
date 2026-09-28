@@ -1992,6 +1992,8 @@ export class CodexSecurity {
             historicalCost: (threadId) => readHistoricalCost(threadId, scanDir),
           });
           if (terminal !== null) {
+            // A failed optional thread write does not prove the merge was free.
+            if (typeof resumeThreadId !== "string") terminalMergeCost = null;
             const { constituents } = terminal.accounting;
             if (
               constituents !== null &&
