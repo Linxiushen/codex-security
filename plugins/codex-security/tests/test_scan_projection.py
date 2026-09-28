@@ -269,3 +269,54 @@ def test_projection_keeps_windows_scope_case_semantics(
     assert result["sourceFindings"] == ([finding] if expected else [])
     if expected:
         assert result["draft"]["findings"][0]["provenance"]["sourceFindingIds"] == ["child:0"]
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_projection_many_selected_paths_keeps_boundaries_and_source_order(
+    windows, monkeypatch, tmp_path
+):
+    import ntpath
+    import posixpath
+
+    import project_scan_artifacts as projection
+
+    monkeypatch.setattr(projection, "normcase", ntpath.normcase if windows else posixpath.normcase)
+    parent = tmp_path / "parent"
+    source = parent / "child"
+    source.mkdir(parents=True)
+    findings = []
+    expected = []
+    for index in range(1000):
+        paths = {
+            0: [f"src/selected/{index}.py"],
+            1: [f"src/selected/{index}.py.extra"],
+            2: [f"src/selected-other/{index}.py"],
+            3: ["outside/file.py", f"DOCS/nested/{index}.md"],
+        }[index % 4]
+        finding = {
+            "locations": [{"path": path} for path in paths],
+            "provenance": {"source": "local_plugin"},
+        }
+        findings.append(finding)
+        if index % 4 == 0 or (windows and index % 4 == 3):
+            expected.append(finding)
+
+    def project(scopes):
+        return projection.project_scan_artifacts(
+            "parent",
+            "child",
+            source,
+            parent,
+            {"scan": {"scope": {"includePaths": scopes, "excludePaths": []}}},
+            {"findings": findings},
+            {"completeness": "complete", "surfaces": [], "deferred": [], "explicitExclusions": []},
+        )
+
+    projected = project([f"src/selected/{index}.py" for index in range(1000)] + ["./docs/"])
+    assert projected["sourceFindings"] == expected
+    for index, (draft, original) in enumerate(
+        zip(projected["draft"]["findings"], expected, strict=True)
+    ):
+        assert draft["locations"] == original["locations"]
+        assert draft["provenance"]["sourceFindingIds"] == [f"child:{index}"]
+    assert project(["."])["sourceFindings"] == findings

@@ -14,7 +14,7 @@ import os
 import sys
 import unicodedata
 from os.path import normcase
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -26,7 +26,6 @@ from finalize_scan_contract import (
     scan_root_identity,
     write_scan_local_bytes,
 )
-from workbench_validation import path_within_scope
 
 
 class RootIdentity(TypedDict):
@@ -75,15 +74,19 @@ def project_scan_artifacts(
         raise ContractError("scan directory: changed after artifact restoration setup")
     prefix = source_directory.relative_to(parent_directory).as_posix()
     scan = manifest["scan"]
+    scopes = {PurePosixPath(_scope_path(scope)) for scope in scan["scope"]["includePaths"]}
+
+    def in_scope(value: str) -> bool:
+        path = PurePosixPath(_scope_path(value))
+        if path.is_absolute() or ".." in path.parts:
+            return False
+        return path in scopes or any(parent in scopes for parent in path.parents)
+
     originals = copy.deepcopy(
         [
             finding
             for finding in findings["findings"]
-            if any(
-                path_within_scope(_scope_path(location["path"]), _scope_path(scope))
-                for location in finding["locations"]
-                for scope in scan["scope"]["includePaths"]
-            )
+            if any(in_scope(location["path"]) for location in finding["locations"])
         ]
     )
     # Merge the compatible view while retaining the exact sealed originals as provenance.
