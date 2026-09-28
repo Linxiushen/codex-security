@@ -250,6 +250,7 @@ def test_projection_keeps_windows_scope_case_semantics(
 ):
     import ntpath
 
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import project_scan_artifacts as projection
 
     monkeypatch.setattr(projection, "normcase", ntpath.normcase)
@@ -278,6 +279,7 @@ def test_projection_many_selected_paths_keeps_boundaries_and_source_order(
     import ntpath
     import posixpath
 
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
     import project_scan_artifacts as projection
 
     monkeypatch.setattr(projection, "normcase", ntpath.normcase if windows else posixpath.normcase)
