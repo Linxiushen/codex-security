@@ -73,7 +73,18 @@ def run_inventory(
 
 def standard_inventory(repository: Path, scope: str) -> bytes:
     files = subprocess.run(
-        ["rg", "--files", "--hidden", "--glob", "!**/.git", "--path-separator=/", "--", scope],
+        [
+            "rg",
+            "--files",
+            "--hidden",
+            "--glob",
+            "!**/.git",
+            "--glob",
+            "!**/.git/**",
+            "--path-separator=/",
+            "--",
+            scope,
+        ],
         cwd=repository,
         capture_output=True,
         check=False,
@@ -170,20 +181,47 @@ def test_inventory_excludes_git_metadata_from_a_nested_repository(
     assert all(".git" not in PurePosixPath(path).parts for path in paths)
 
 
-def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "scope",
+    [
+        ".git",
+        "./.git",
+        ".git/hooks",
+        "vendor/lib/.git",
+        "./vendor/lib/.git",
+        "vendor/lib/.git/hooks",
+    ],
+)
+def test_inventory_excludes_metadata_when_scoped_inside_a_git_directory(
+    tmp_path: Path, scope: str
+) -> None:
+    repository = make_repository(tmp_path)
+    for prefix in (".git", "vendor/lib/.git"):
+        write_file(repository, f"{prefix}/hooks/example.py")
+    output = tmp_path / "in_scope_files.txt"
+
+    result = run_inventory(repository, scope, output)
+
+    assert result.returncode == 0, result.stderr
+    assert output.read_bytes() == b""
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_inventory_excludes_the_git_file_of_a_linked_worktree(tmp_path: Path, nested: bool) -> None:
     repository = make_repository(tmp_path)
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "base")
-    worktree = tmp_path / "worktree"
+    worktree = repository / "vendor" / "lib" if nested else tmp_path / "worktree"
     git(repository, "worktree", "add", "-q", str(worktree), "HEAD")
     output = tmp_path / "in_scope_files.txt"
 
-    result = run_inventory(worktree, ".", output)
+    result = run_inventory(repository if nested else worktree, ".", output)
 
     assert result.returncode == 0, result.stderr
     paths = output.read_text(encoding="utf-8").splitlines()
-    assert "./app/routes.py" in paths
-    assert "./.git" not in paths
+    prefix = "./vendor/lib" if nested else "."
+    assert f"{prefix}/app/routes.py" in paths
+    assert all(".git" not in PurePosixPath(path).parts for path in paths)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows does not allow CR/LF in filenames")

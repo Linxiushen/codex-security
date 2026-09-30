@@ -94,8 +94,11 @@ def generate_in_scope_files(repository: Path, scope: str, output: Path) -> int:
         "--hidden",
         "--path-separator",
         "/",
+        # Prune Git metadata and its contents even when the scope starts inside .git.
         "--glob",
         "!**/.git",
+        "--glob",
+        "!**/.git/**",
         "--",
         scope,
     ]

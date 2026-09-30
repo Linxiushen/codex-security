@@ -33,6 +33,7 @@ const inventory = await import(
 try {
   await testSchemasAreBoundAndExact();
   await testPrepareUsesTheExistingStandardGenerator();
+  await testPrepareExcludesGitMetadata();
   await testPrepareUsesOnlyAuthoritativeDiffChanges();
   await testPrepareIncludesStagedAndUnstagedChanges();
   await testWorkerReadsItsOwnBoundInventory();
@@ -144,6 +145,49 @@ async function testPrepareUsesTheExistingStandardGenerator() {
   assert.deepEqual(
     [...first.items, ...second.items].map((item) => item.path),
     expected.split("\n").filter(Boolean),
+  );
+}
+
+async function testPrepareExcludesGitMetadata() {
+  const fixture = await createFixture("nested repositories");
+  for (const [name, source] of [
+    [".git/config", "[core]\n"],
+    ["vendor/lib/.git/HEAD", "ref: refs/heads/main\n"],
+    ["vendor/lib/.git/hooks/example.py", "pass\n"],
+    ["vendor/lib/handler.py", "pass\n"],
+    ["vendor/worktree/.git", "gitdir: ../../.git/worktrees/example\n"],
+    ["vendor/worktree/handler.py", "pass\n"],
+    [".gitignore", "*.skip\n"],
+    [".github/workflows/check.yml", "name: example\n"],
+    ["src/widget.git", "example\n"],
+  ]) {
+    await writeRepositoryFile(fixture.repoRoot, name, source);
+  }
+
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(fixture.scan),
+    { reviewItemsTotal: 5 },
+  );
+  assert.deepEqual(await inventory.listCodexSecurityReviewItems(fixture.scan), {
+    items: [
+      { path: "./.github/workflows/check.yml" },
+      { path: "./.gitignore" },
+      { path: "./src/widget.git" },
+      { path: "./vendor/lib/handler.py" },
+      { path: "./vendor/worktree/handler.py" },
+    ],
+  });
+
+  const metadataScope = { ...fixture.scan, scope: "vendor/lib/.git/hooks" };
+  assert.deepEqual(
+    await inventory.prepareCodexSecurityReviewItems(metadataScope),
+    { reviewItemsTotal: 0 },
+  );
+  assert.deepEqual(
+    await inventory.listCodexSecurityReviewItems(metadataScope),
+    {
+      items: [],
+    },
   );
 }
 
@@ -457,6 +501,8 @@ async function standardInventory(repository, scope) {
       "--hidden",
       "--glob",
       "!**/.git",
+      "--glob",
+      "!**/.git/**",
       "--path-separator=/",
       "--",
       scope,
