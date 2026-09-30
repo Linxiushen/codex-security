@@ -40,10 +40,10 @@ def finding_source_excerpt(
     source = scanned_source_text(scan, target, path)
     if not source or "\0" in source:
         return None
-    # Number lines the way Git and the scanning tools do: only "\n" starts a new line.
-    # str.splitlines() also breaks on "\f", "\x85" and "\u2028", which shifts every
-    # later line away from the line numbers recorded with the finding.
-    lines = [line.removesuffix("\r") for line in source.removesuffix("\n").split("\n")]
+    # Match location validation and SARIF hashing: CR, LF, and CRLF are line breaks.
+    # Keep form feeds and Unicode separators within their original source lines.
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.removesuffix("\n").split("\n")
     if start_line < 1 or start_line > len(lines):
         return None
     last_affected_line = end_line if isinstance(end_line, int) else start_line
